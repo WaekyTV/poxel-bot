@@ -4,28 +4,28 @@ from datetime import datetime, timedelta
 import asyncio
 import re  # Pour parser la durée
 import os  # Pour accéder aux variables d'environnement (le TOKEN)
+import json # Pour parser le JSON des identifiants Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ==============================================================================
 # === INSTRUCTIONS IMPORTANTES POUR L'HÉBERGEMENT HORS REPLIT ===
 # ==============================================================================
-# Ce code est simplifié pour fonctionner sur une plateforme d'hébergement
+# Ce code est optimisé pour fonctionner sur une plateforme d'hébergement
 # qui maintient les processus actifs en continu (comme Render, Heroku, etc.).
 #
 # 1. DÉPENDANCES : Assurez-vous que les bibliothèques suivantes sont installées
 #    dans l'environnement de déploiement :
 #    - discord.py
 #    - firebase-admin
-#    Vous devrez peut-être créer un fichier `requirements.txt` avec ces noms
-#    pour que la plateforme les installe automatiquement.
+#    Un fichier `requirements.txt` est recommandé pour cela.
 #
-# 2. FICHIER FIREBASE : Assurez-vous que le fichier 'serviceAccountKey.json'
-#    est présent dans le même dossier que ce script.
-#
-# 3. VARIABLES D'ENVIRONNEMENT : Le TOKEN Discord doit être configuré
-#    comme une variable d'environnement nommée 'DISCORD_TOKEN' sur votre
+# 2. VARIABLES D'ENVIRONNEMENT : Le TOKEN Discord et les identifiants Firebase
+#    doivent être configurés comme des variables d'environnement sur votre
 #    service d'hébergement.
+#    - DISCORD_TOKEN : Votre jeton Discord.
+#    - FIREBASE_CREDENTIALS_JSON : Le contenu complet du fichier
+#      'serviceAccountKey.json' sous forme de chaîne de caractères JSON.
 # ==============================================================================
 
 # --- Configuration du Bot ---
@@ -38,13 +38,20 @@ if not TOKEN:
 
 # --- Configuration Firebase ---
 try:
-    cred = credentials.Certificate('serviceAccountKey.json')
+    # Récupère les identifiants depuis la variable d'environnement
+    firebase_credentials_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+    if not firebase_credentials_json:
+        print("ERREUR : La variable d'environnement 'FIREBASE_CREDENTIALS_JSON' est manquante.")
+        exit()
+
+    cred_dict = json.loads(firebase_credentials_json)
+    cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("Firebase Admin SDK initialisé avec succès.")
 except Exception as e:
     print(f"ERREUR lors de l'initialisation de Firebase Admin SDK: {e}")
-    print("Assurez-vous que 'serviceAccountKey.json' est présent et valide.")
+    print("Assurez-vous que 'FIREBASE_CREDENTIALS_JSON' est valide.")
     exit()
 
 # Les "intents" sont les permissions que le bot demande à Discord.
