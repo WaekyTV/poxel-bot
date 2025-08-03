@@ -153,7 +153,7 @@ async def on_command_error(ctx, error):
 
 # --- Commandes du Bot ---
 
-@bot.command(name='create_event', usage='<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_attente_vocal> <#salle_de_l'event_vocal> <Nom de la partie>')
+@bot.command(name='create_event', usage="<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_attente_vocal> <#salle_de_l'event_vocal> <Nom de la partie>")
 @commands.has_permissions(manage_roles=True)
 async def create_event(ctx, role: discord.Role, duration_str: str, max_participants: int, participant_label: str, waiting_room_channel: discord.VoiceChannel, destination_voice_channel: discord.VoiceChannel, *event_name_parts):
     """
