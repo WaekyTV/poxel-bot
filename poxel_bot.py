@@ -153,14 +153,14 @@ async def on_command_error(ctx, error):
 
 # --- Commandes du Bot ---
 
-@bot.command(name='create_event', usage="<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_attente_vocal> <#salle_de_l'event_vocal> <Nom de la partie>")
+@bot.command(name='create_event', usage="<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_rendez-vous_vocal> <#salle_de_l'event_vocal> <Nom de la partie>")
 @commands.has_permissions(manage_roles=True)
 async def create_event(ctx, role: discord.Role, duration_str: str, max_participants: int, participant_label: str, waiting_room_channel: discord.VoiceChannel, destination_voice_channel: discord.VoiceChannel, *event_name_parts):
     """
-    Crée une nouvelle partie avec un rôle temporaire, des salons et une durée.
+    Crée une nouvelle partie avec un rôle temporaire, un salon de rendez-vous et une durée.
 
     Exemple d'utilisation :
-    `!create_event @Joueur 1h30m 4 joueurs #salle-d-attente #salle-de-l'event Partie de Donjons`
+    `!create_event @Joueur 1h30m 4 joueurs #point-de-ralliement #salle-de-l'event Partie de Donjons`
     """
     event_name = " ".join(event_name_parts)
     if not event_name:
@@ -231,15 +231,14 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
     embed = discord.Embed(
         title=f"NOUVELLE PARTIE : {event_name.upper()}",
         description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
-                    f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le salon vocal de la **salle d'attente** et patienter d'être déplacé.",
+                    f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le salon vocal de **point de ralliement** et patienter d'être déplacé.",
         color=discord.Color.from_rgb(255, 0, 154)
     )
     embed.add_field(name=f"**Participants ({max_participants})**", value="*Aucun participant inscrit pour le moment.*", inline=False)
     embed.add_field(name="**Rôle attribué :**", value=f"{role.mention}", inline=True)
-    embed.add_field(name="**Salle d'attente :**", value=f"{waiting_room_channel.mention}", inline=True)
-    embed.add_field(name="**Salle de l'event :**", value=f"{destination_voice_channel.mention}", inline=True)
+    embed.add_field(name="**Point de ralliement :**", value=f"{waiting_room_channel.mention}", inline=True)
     embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
-    embed.set_footer(text="| P.O.X.E.L | Appuyez sur START pour participer.")
+    embed.set_footer(text="| POXEL | Appuyez sur START pour participer.")
     embed.timestamp = datetime.now()
 
     await temp_message.edit(content=None, embed=embed, view=view)
@@ -367,7 +366,7 @@ async def move_participants(ctx, *event_name_parts):
                 print(f"Erreur lors du déplacement de {member.display_name}: {e}")
 
     if participants_count > 0:
-        await ctx.send(f"| INFO | {participants_count} PARTICIPANTS ONT ÉTÉ DÉPLACÉS VERS {destination_channel.mention}", ephemeral=False)
+        await ctx.send(f"| INFO | {participants_count} PARTICIPANTS ONT ÉTÉ DÉPLACÉS", ephemeral=False)
     else:
         await ctx.send(f"| INFO | AUCUN PARTICIPANT À DÉPLACER POUR LA PARTIE '{event_name.upper()}'", ephemeral=True)
 
@@ -399,7 +398,6 @@ async def list_events(ctx):
         role = guild.get_role(data['role_id']) if guild else None
         text_channel = guild.get_channel(data['text_channel_id']) if guild else None
         waiting_room_channel = guild.get_channel(data['waiting_room_channel_id']) if guild else None
-        destination_voice_channel = guild.get_channel(data['destination_voice_channel_id']) if guild else None
 
         participants_count = len(data.get('participants', []))
         
@@ -407,14 +405,13 @@ async def list_events(ctx):
             name=f"🎮 {data['name'].upper()}",
             value=(
                 f"**Rôle attribué :** {role.mention if role else 'NON TROUVÉ'}\n"
-                f"**Salle d'attente :** {waiting_room_channel.mention if waiting_room_channel else 'NON TROUVÉ'}\n"
-                f"**Salle de l'event :** {destination_voice_channel.mention if destination_voice_channel else 'NON TROUVÉ'}\n"
+                f"**Point de ralliement :** {waiting_room_channel.mention if waiting_room_channel else 'NON TROUVÉ'}\n"
                 f"**Participants :** {participants_count} / {data['max_participants']} {data['participant_label']}\n"
                 f"**Fin de partie :** <t:{int(data['end_time'].timestamp())}:R>"
             ),
             inline=False
         )
-    embed.set_footer(text="| P.O.X.E.L | Base de données des parties")
+    embed.set_footer(text="| POXEL | Base de données des parties")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -426,10 +423,10 @@ async def intro_command(ctx):
     Affiche la présentation de Poxel et ses commandes.
     """
     embed = discord.Embed(
-        title="| P.O.X.E.L ASSISTANT |",
+        title="| POXEL ASSISTANT |",
         description=(
             f"**Bonjour waeky !**\n"
-            f"Je suis Poxel, votre assistant personnel pour l'organisation de parties de jeux.\n"
+            f"Je suis POXEL, votre assistant personnel pour l'organisation de parties de jeux.\n"
             f"Utilisez `!help poxel` pour voir toutes mes commandes."
         ),
         color=discord.Color.from_rgb(145, 70, 255)
@@ -486,7 +483,7 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             updated_event_data = event_ref.get().to_dict()
             
             await _update_event_embed(guild, updated_event_data, event_data['message_id'])
-            await interaction.followup.send(f"| INFO | BIENVENUE ! Vous avez reçu le rôle `{role.name}`. Veuillez vous rendre dans le salon vocal **d'attente** et patienter d'être déplacé.", ephemeral=True)
+            await interaction.followup.send(f"| INFO | BIENVENUE ! Vous avez reçu le rôle `{role.name}`. Veuillez vous rendre dans le salon vocal de **point de ralliement** et patienter d'être déplacé.", ephemeral=True)
         except discord.Forbidden:
             await interaction.followup.send("| ERREUR | PERMISSIONS INSUFFISANTES pour donner le rôle.", ephemeral=True)
             return
@@ -560,15 +557,15 @@ async def help_command(ctx, bot_name: str = None):
 
     embed = discord.Embed(
         title="| MANUEL DU JOUEUR |",
-        description="Voici la liste des commandes disponibles pour Poxel :",
+        description="Voici la liste des commandes disponibles pour POXEL :",
         color=discord.Color.from_rgb(0, 158, 255)
     )
 
     commands_info = {
         "create_event": {
-            "description": "Crée une nouvelle partie avec un rôle temporaire et deux salons vocaux.",
-            "usage": ("`!create_event @rôle durée(ex: 2h) max_participants étiquette_participants #salon_attente #salle_de_l'event Nom de la partie`\n"
-                      "Ex: `!create_event @Joueur 1h30m 4 joueurs #salle-d-attente #salle-de-l'event Partie de Donjons`")
+            "description": "Crée une nouvelle partie avec un rôle temporaire, un salon de rendez-vous et une durée.",
+            "usage": ("`!create_event @rôle durée(ex: 2h) max_participants étiquette_participants #point_de_ralliement_vocal Nom de la partie`\n"
+                      "Ex: `!create_event @Joueur 1h30m 4 joueurs joueurs #point-de-ralliement Partie de Donjons`")
         },
         "end_event": {
             "description": "Termine une partie en cours et retire les rôles aux participants.",
@@ -585,7 +582,7 @@ async def help_command(ctx, bot_name: str = None):
             "usage": "`!list_events`"
         },
         "intro": {
-            "description": "Affiche la présentation de Poxel sur le serveur.",
+            "description": "Affiche la présentation de POXEL sur le serveur.",
             "usage": "`!intro`"
         },
         "help": {
@@ -604,7 +601,7 @@ async def help_command(ctx, bot_name: str = None):
             inline=False
         )
     
-    embed.set_footer(text="| P.O.X.E.L | Bon jeu, waeky !")
+    embed.set_footer(text="| POXEL | Bon jeu, waeky !")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
