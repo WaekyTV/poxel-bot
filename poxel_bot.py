@@ -231,7 +231,7 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
     embed = discord.Embed(
         title=f"NOUVELLE PARTIE : {event_name.upper()}",
         description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
-                    f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le salon vocal de **point de ralliement** et patienter d'être déplacé.",
+                    f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le **point de ralliement** et patienter d'être déplacé.",
         color=discord.Color.from_rgb(255, 0, 154)
     )
     embed.add_field(name=f"**Participants ({max_participants})**", value="*Aucun participant inscrit pour le moment.*", inline=False)
@@ -483,7 +483,7 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             updated_event_data = event_ref.get().to_dict()
             
             await _update_event_embed(guild, updated_event_data, event_data['message_id'])
-            await interaction.followup.send(f"| INFO | BIENVENUE ! Vous avez reçu le rôle `{role.name}`. Veuillez vous rendre dans le salon vocal de **point de ralliement** et patienter d'être déplacé.", ephemeral=True)
+            await interaction.followup.send(f"| INFO | BIENVENUE ! Vous avez reçu le rôle `{role.name}`. Veuillez vous rendre dans le **point de ralliement** et patienter d'être déplacé.", ephemeral=True)
         except discord.Forbidden:
             await interaction.followup.send("| ERREUR | PERMISSIONS INSUFFISANTES pour donner le rôle.", ephemeral=True)
             return
