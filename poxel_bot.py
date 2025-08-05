@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # Ajout de timezone
 import asyncio
 import re # Pour parser la durée
 import os # Pour accéder aux variables d'environnement (le TOKEN)
@@ -624,7 +624,7 @@ def run_keep_alive():
             try:
                 # REMPLACEZ 'VOTRE_URL_DE_DÉPLOIEMENT' par l'URL réelle de votre bot (par exemple, de Render, Replit, etc.)
                 # Exemple : https://mon-bot-poxel.onrender.com ou https://mon-bot-poxel.replit.app
-                response = requests.get('VOTRE_URL_DE_DÉPLOIEMENT')
+                response = requests.get('https://poxel-bot.onrender.com')
                 print(f"Ping de l'URL réussi avec le statut {response.status_code}")
             except Exception as e:
                 print(f"Erreur lors du ping de l'URL : {e}")
