@@ -5,7 +5,7 @@ import asyncio
 import re
 import os
 import threading
-from flask import Flask, jsonify # Ajout de jsonify pour des réponses Flask plus claires
+from flask import Flask, jsonify
 import requests
 import time
 import json
@@ -22,11 +22,13 @@ if not TOKEN:
 
 # --- Configuration Firebase ---
 try:
+    # Récupère les identifiants depuis la variable d'environnement
     firebase_credentials_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
     if not firebase_credentials_json:
         print("ERREUR : La variable d'environnement 'FIREBASE_CREDENTIALS_JSON' est manquante.")
         exit()
 
+    # Charge les identifiants JSON depuis la chaîne de caractères
     cred_dict = json.loads(firebase_credentials_json)
     cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred)
@@ -34,7 +36,7 @@ try:
     print("Firebase Admin SDK initialisé avec succès.")
 except Exception as e:
     print(f"ERREUR lors de l'initialisation de Firebase Admin SDK: {e}")
-    print("Assurez-vous que 'FIREBASE_CREDENTIALS_JSON' est valide.")
+    print("Assurez-vous que 'FIREBASE_CREDENTIALS_JSON' est valide et correctement formaté.")
     exit()
 
 intents = discord.Intents.default()
@@ -314,7 +316,7 @@ async def _end_event(event_doc_id: str):
 
     if text_channel:
         try:
-            await text_channel.send(f"| ALERTE | L'événement **'{event_name.upper()}'** est maintenant clos.")
+            await text_channel.send(f"| ALERTE | FIN DE PARTIE : '{event_name.upper()}'")
         except discord.Forbidden:
             print(f"Permissions insuffisantes pour envoyer un message dans le salon {text_channel.name}")
     else:
@@ -324,7 +326,7 @@ async def _end_event(event_doc_id: str):
         event_message = await text_channel.fetch_message(event_data['message_id'])
         if event_message:
             embed = event_message.embeds[0]
-            embed.color = discord.Color.from_rgb(0, 158, 255)
+            embed.color = discord.Color.from_rgb(0, 158, 255) # Bleu
             embed.title = f"PARTIE TERMINÉE : {event_name.upper()}"
             embed.description = f"**La partie est terminée. Bien joué !**"
             embed.clear_fields()
@@ -354,6 +356,7 @@ async def end_event_command(ctx, *event_name_parts):
         return
 
     event_doc_id = existing_event_docs[0].id
+    
     await ctx.send(f">>> Fin de la partie '{event_name.upper()}' en cours...", ephemeral=True)
     await _end_event(event_doc_id)
     await ctx.send(f"| INFO | PARTIE '{event_name.upper()}' TERMINÉE MANUELLEMENT", ephemeral=True)
@@ -388,7 +391,7 @@ async def move_participants(ctx, *event_name_parts):
             try:
                 await member.move_to(destination_channel, reason=f"Déplacement pour la partie {event_name}")
                 participants_count += 1
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5) # Pour éviter de dépasser la limite de requêtes de Discord
             except discord.Forbidden:
                 print(f"Permissions insuffisantes pour déplacer {member.display_name}.")
             except Exception as e:
@@ -419,7 +422,7 @@ async def list_events(ctx):
     embed = discord.Embed(
         title="| PARTIES ACTIVES |",
         description="Voici la liste des parties en cours :",
-        color=discord.Color.from_rgb(0, 158, 255)
+        color=discord.Color.from_rgb(0, 158, 255) # Bleu électrique
     )
 
     for data in events_list:
@@ -441,7 +444,7 @@ async def list_events(ctx):
             ),
             inline=False
         )
-    embed.set_footer(text="| POXEL | Base de données des parties", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
+    embed.set_footer(text="| P.O.X.E.L | Base de données des parties", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -459,7 +462,7 @@ async def intro_command(ctx):
             f"Je suis Poxel, votre assistant personnel pour l'organisation de parties de jeux.\n"
             f"Utilisez `!help poxel` pour voir toutes mes commandes."
         ),
-        color=discord.Color.from_rgb(145, 70, 255)
+        color=discord.Color.from_rgb(145, 70, 255) # Violet de Twitch
     )
     embed.set_footer(text="Système en ligne.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
@@ -482,7 +485,7 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
     event_name = event_data.get('name', 'Nom inconnu')
     guild = interaction.guild
     role = guild.get_role(event_data['role_id'])
-    
+
     if not role:
         await interaction.response.send_message("| ERREUR | RÔLE DE JOUEUR INTROUVABLE", ephemeral=True)
         return
@@ -548,6 +551,7 @@ async def on_interaction(interaction: discord.Interaction):
             event_firestore_id = custom_id.replace("leave_event_", "")
             await handle_event_participation(interaction, event_firestore_id, 'leave')
     
+    # S'assure que les commandes sont toujours traitées
     await bot.process_commands(interaction)
 
 
@@ -558,11 +562,12 @@ async def check_expired_events():
     """
     print("Vérification des parties expirées...")
     events_ref = db.collection('events')
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc) # Utilisez timezone.utc ici pour la cohérence
     for doc in events_ref.stream():
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
         
+        # S'assure que event_end_time est bien un objet datetime avec timezone pour la comparaison
         if isinstance(event_end_time, datetime) and event_end_time.replace(tzinfo=timezone.utc) < now:
             print(f"Partie '{event_data.get('name', doc.id)}' expirée. Fin de la partie...")
             await _end_event(doc.id)
@@ -580,7 +585,7 @@ async def help_command(ctx, bot_name: str = None):
     embed = discord.Embed(
         title="| MANUEL DU JOUEUR |",
         description="Voici la liste des commandes disponibles pour Poxel :",
-        color=discord.Color.from_rgb(0, 158, 255)
+        color=discord.Color.from_rgb(0, 158, 255) # Bleu électrique
     )
 
     commands_info = {
@@ -623,7 +628,7 @@ async def help_command(ctx, bot_name: str = None):
             inline=False
         )
     
-    embed.set_footer(text="| POXEL | Bon jeu, waeky !", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
+    embed.set_footer(text="| P.O.X.E.L | Bon jeu, waeky !", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -636,18 +641,14 @@ async def help_command(ctx, bot_name: str = None):
 
 if __name__ == "__main__":
     # Démarre la tâche d'auto-ping sur un thread séparé immédiatement.
-    # Cela garantit que le service Render reste actif même si le bot Discord
-    # a des problèmes de connexion.
     ping_thread = threading.Thread(target=ping_self)
     ping_thread.daemon = True
     ping_thread.start()
 
     # Démarre le bot Discord sur un thread séparé.
-    # Un petit délai est ajouté dans run_discord_bot pour éviter les rate limits.
     discord_bot_thread = threading.Thread(target=run_discord_bot)
     discord_bot_thread.daemon = True
     discord_bot_thread.start()
 
     # Exécute l'application Flask sur le thread principal.
-    # C'est cette exécution qui est détectée par Render pour maintenir le service actif.
     app.run(host='0.0.0.0', port=8080)
