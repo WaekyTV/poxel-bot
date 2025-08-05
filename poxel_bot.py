@@ -57,6 +57,9 @@ def home():
 def run_discord_bot():
     """Exécute le bot Discord sur son propre thread."""
     try:
+        # Ajout d'un petit délai avant de tenter de connecter le bot.
+        # Cela peut aider à atténuer les problèmes de "Too Many Requests" lors de redémarrages rapides.
+        time.sleep(5) 
         bot.run(TOKEN)
     except discord.LoginFailure:
         print("ERREUR DE CONNEXION : Jeton Discord invalide. Veuillez vérifier votre DISCORD_TOKEN.")
@@ -138,10 +141,8 @@ async def on_ready():
     # Démarre la tâche de vérification des événements expirés
     check_expired_events.start()
     
-    # Démarre la tâche d'auto-ping UNIQUEMENT APRÈS que le bot soit connecté à Discord
-    ping_thread = threading.Thread(target=ping_self)
-    ping_thread.daemon = True # Permet au thread de se fermer si le programme principal se termine
-    ping_thread.start()
+    # La tâche d'auto-ping est maintenant démarrée au début du script,
+    # donc pas besoin de la démarrer ici.
 
 
 @bot.event
@@ -612,14 +613,20 @@ async def help_command(ctx, bot_name: str = None):
 # ainsi que la tâche de ping sur des threads séparés.
 # ==============================================================================
 
-# Démarre le bot Discord sur un thread séparé
-# Le thread du bot est démarré ici, mais la connexion à Discord (bot.run)
-# se fait à l'intérieur de la fonction run_discord_bot.
-discord_bot_thread = threading.Thread(target=run_discord_bot)
-discord_bot_thread.daemon = True
-discord_bot_thread.start()
-
-# L'application Flask est exécutée sur le thread principal.
-# C'est cette exécution qui est détectée par Render pour maintenir le service actif.
 if __name__ == "__main__":
+    # Démarre la tâche d'auto-ping sur un thread séparé immédiatement.
+    # Cela garantit que le service Render reste actif même si le bot Discord
+    # a des problèmes de connexion.
+    ping_thread = threading.Thread(target=ping_self)
+    ping_thread.daemon = True
+    ping_thread.start()
+
+    # Démarre le bot Discord sur un thread séparé.
+    # Un petit délai est ajouté dans run_discord_bot pour éviter les rate limits.
+    discord_bot_thread = threading.Thread(target=run_discord_bot)
+    discord_bot_thread.daemon = True
+    discord_bot_thread.start()
+
+    # Exécute l'application Flask sur le thread principal.
+    # C'est cette exécution qui est détectée par Render pour maintenir le service actif.
     app.run(host='0.0.0.0', port=8080)
