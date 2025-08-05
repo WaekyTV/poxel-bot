@@ -435,13 +435,13 @@ async def list_events(ctx):
             value=(
                 f"**Rôle requis :** {role.mention if role else 'NON TROUVÉ'}\n"
                 f"**Salon de jeu :** {text_channel.mention if text_channel else 'NON TROUVÉ'}\n"
-                f"**Point de ralliement :** {waiting_room_channel.mention if waiting_room_channel else 'NON TROUVÉ'}\n"
+                f"**Salon d'attente :** {waiting_room_channel.mention if waiting_room_channel else 'NON TROUVÉ'}\n"
                 f"**Joueurs inscrits :** {participants_count} / {data['max_participants']} {data['participant_label']}\n"
                 f"**Fin de partie :** <t:{int(data['end_time'].timestamp())}:R>"
             ),
             inline=False
         )
-    embed.set_footer(text="| POXEL | Base de données des parties")
+    embed.set_footer(text="| POXEL | Base de données des parties", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -453,15 +453,15 @@ async def intro_command(ctx):
     Affiche la présentation de Poxel et ses commandes.
     """
     embed = discord.Embed(
-        title="| POXEL ASSISTANT |",
+        title="| P.O.X.E.L ASSISTANT |",
         description=(
             f"**Bonjour waeky !**\n"
-            f"Je suis POXEL, votre assistant personnel pour l'organisation de parties de jeux.\n"
+            f"Je suis Poxel, votre assistant personnel pour l'organisation de parties de jeux.\n"
             f"Utilisez `!help poxel` pour voir toutes mes commandes."
         ),
         color=discord.Color.from_rgb(145, 70, 255)
     )
-    embed.set_footer(text="Système en ligne.")
+    embed.set_footer(text="Système en ligne.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -499,6 +499,7 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             return
 
         try:
+            # Ajoute le rôle directement et met à jour Firestore
             await user.add_roles(role, reason=f"Participation à la partie {event_name}")
             event_ref.update({'participants': firestore.ArrayUnion([user.id])})
             updated_event_data = event_ref.get().to_dict()
@@ -518,6 +519,7 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             return
 
         try:
+            # Retire le rôle et met à jour Firestore
             await user.remove_roles(role, reason=f"Quitte la partie {event_name}")
             event_ref.update({'participants': firestore.ArrayRemove([user.id])})
             updated_event_data = event_ref.get().to_dict()
@@ -577,7 +579,7 @@ async def help_command(ctx, bot_name: str = None):
 
     embed = discord.Embed(
         title="| MANUEL DU JOUEUR |",
-        description="Voici la liste des commandes disponibles pour POXEL :",
+        description="Voici la liste des commandes disponibles pour Poxel :",
         color=discord.Color.from_rgb(0, 158, 255)
     )
 
