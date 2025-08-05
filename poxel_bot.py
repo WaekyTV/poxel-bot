@@ -9,6 +9,7 @@ from flask import Flask, jsonify
 import requests
 import time
 import json
+import traceback # Ajouté pour afficher la trace complète des erreurs
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -65,10 +66,10 @@ def run_discord_bot():
         try:
             print(f"Tentative de connexion du bot Discord... (prochaine tentative dans {retry_delay}s si échec)")
             bot.run(TOKEN)
-            # Si bot.run() réussit, cela signifie que le bot s'est connecté et ne s'est pas déconnecté.
-            # Le code n'atteindra cette ligne que si bot.run() se termine (ex: déconnexion forcée).
-            print("Le bot Discord s'est déconnecté. Tentative de reconnexion...")
-            retry_delay = 5 # Réinitialise le délai après une déconnexion
+            # Si cette ligne est atteinte, cela signifie que bot.run() s'est terminé.
+            # Cela ne devrait arriver que si le bot se déconnecte ou s'arrête.
+            print("Le bot Discord s'est déconnecté ou l'exécution de bot.run() s'est terminée. Tentative de reconnexion...")
+            retry_delay = 5 # Réinitialise le délai après une déconnexion ou une fin d'exécution
             time.sleep(retry_delay) # Attend avant de retenter la connexion
         except discord.errors.HTTPException as e:
             if e.status == 429: # Too Many Requests
@@ -83,7 +84,8 @@ def run_discord_bot():
             print("ERREUR DE CONNEXION : Jeton Discord invalide. Veuillez vérifier votre DISCORD_TOKEN. Arrêt du bot.")
             break # Arrête le thread si le jeton est invalide
         except Exception as e:
-            print(f"ERREUR INATTENDUE LORS DE L'EXÉCUTION DU BOT : {e}. Nouvelle tentative dans {retry_delay}s.")
+            print(f"ERREUR INATTENDUE LORS DE L'EXÉCUTION DU BOT : {e}.")
+            traceback.print_exc() # Affiche la trace complète de l'erreur
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_retry_delay)
 
@@ -258,15 +260,15 @@ async def create_event(ctx, role: discord.Role, text_channel: discord.TextChanne
 
         embed = discord.Embed(
             title=f"NOUVELLE PARTIE : {event_name.upper()}",
-            description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
-                        f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le **point de ralliement** {waiting_room_channel.mention} et patienter d'être déplacé.",
-            color=discord.Color.from_rgb(255, 0, 154)
+            description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**",
+            color=discord.Color.from_rgb(255, 0, 154) # Rose néon
         )
         embed.add_field(name=f"**Joueurs inscrits (0 / {max_participants})**", value="*Aucun joueur inscrit pour le moment.*", inline=False)
         embed.add_field(name="**Rôle requis :**", value=f"{role.mention}", inline=True)
         embed.add_field(name="**Salon de jeu :**", value=f"{text_channel.mention}", inline=True)
         embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
-        embed.set_footer(text="| POXEL | Appuyez sur START pour participer.")
+        embed.add_field(name="**Comment rejoindre ?**", value=f"1. Appuyez sur le bouton 'START'.\n2. Vous obtiendrez votre rôle et serez prêt à être déplacé vers le salon de jeu !", inline=False)
+        embed.set_footer(text="| P.O.X.E.L | Appuyez sur START pour participer.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
         embed.timestamp = datetime.now()
 
         await temp_message.edit(content=None, embed=embed, view=view)
@@ -314,6 +316,9 @@ async def _end_event(event_doc_id: str):
             except Exception as e:
                 print(f"Erreur lors du retrait du rôle à {member.display_name}: {e}")
 
+    event_ref.delete()
+    print(f"Partie '{event_name}' (ID: {event_doc_id}) supprimée de Firestore.")
+
     if text_channel:
         try:
             await text_channel.send(f"| ALERTE | FIN DE PARTIE : '{event_name.upper()}'")
@@ -336,9 +341,6 @@ async def _end_event(event_doc_id: str):
         print(f"Message de la partie {event_name} (ID: {event_doc_id}) non trouvé sur Discord. Il a peut-être été supprimé manuellement.")
     except Exception as e:
         print(f"Erreur lors de la mise à jour du message de la partie : {e}")
-
-    event_ref.delete()
-    print(f"Partie '{event_name}' (ID: {event_doc_id}) supprimée de Firestore.")
 
 
 @bot.command(name='end_event', usage='<Nom de la partie>')
@@ -567,7 +569,6 @@ async def check_expired_events():
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
         
-        # S'assure que event_end_time est bien un objet datetime avec timezone pour la comparaison
         if isinstance(event_end_time, datetime) and event_end_time.replace(tzinfo=timezone.utc) < now:
             print(f"Partie '{event_data.get('name', doc.id)}' expirée. Fin de la partie...")
             await _end_event(doc.id)
@@ -651,4 +652,5 @@ if __name__ == "__main__":
     discord_bot_thread.start()
 
     # Exécute l'application Flask sur le thread principal.
+    # C'est cette exécution qui est détectée par Render pour maintenir le service actif.
     app.run(host='0.0.0.0', port=8080)
