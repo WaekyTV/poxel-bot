@@ -53,18 +53,37 @@ def home():
     """Point d'accès simple pour vérifier que le serveur Flask est en ligne."""
     return "Bot Discord POXEL est en ligne et opérationnel !"
 
-# Fonction pour exécuter le bot Discord
+# Fonction pour exécuter le bot Discord avec gestion des retries
 def run_discord_bot():
-    """Exécute le bot Discord sur son propre thread."""
-    try:
-        # Ajout d'un petit délai avant de tenter de connecter le bot.
-        # Cela peut aider à atténuer les problèmes de "Too Many Requests" lors de redémarrages rapides.
-        time.sleep(5) 
-        bot.run(TOKEN)
-    except discord.LoginFailure:
-        print("ERREUR DE CONNEXION : Jeton Discord invalide. Veuillez vérifier votre DISCORD_TOKEN.")
-    except Exception as e:
-        print(f"ERREUR INATTENDUE LORS DE L'EXÉCUTION DU BOT : {e}")
+    """Exécute le bot Discord sur son propre thread avec une logique de retry."""
+    retry_delay = 5 # Délai initial en secondes
+    max_retry_delay = 600 # Délai maximum (10 minutes)
+
+    while True:
+        try:
+            print(f"Tentative de connexion du bot Discord... (prochaine tentative dans {retry_delay}s si échec)")
+            bot.run(TOKEN)
+            # Si bot.run() réussit, cela signifie que le bot s'est connecté et ne s'est pas déconnecté.
+            # Le code n'atteindra cette ligne que si bot.run() se termine (ex: déconnexion forcée).
+            print("Le bot Discord s'est déconnecté. Tentative de reconnexion...")
+            retry_delay = 5 # Réinitialise le délai après une déconnexion
+            time.sleep(retry_delay) # Attend avant de retenter la connexion
+        except discord.errors.HTTPException as e:
+            if e.status == 429: # Too Many Requests
+                print(f"ERREUR 429 (Too Many Requests) : Discord nous limite. Nouvelle tentative dans {retry_delay}s.")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay) # Augmente le délai de manière exponentielle
+            else:
+                print(f"ERREUR HTTP Discord inattendue ({e.status}) : {e}. Nouvelle tentative dans {retry_delay}s.")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay)
+        except discord.LoginFailure:
+            print("ERREUR DE CONNEXION : Jeton Discord invalide. Veuillez vérifier votre DISCORD_TOKEN. Arrêt du bot.")
+            break # Arrête le thread si le jeton est invalide
+        except Exception as e:
+            print(f"ERREUR INATTENDUE LORS DE L'EXÉCUTION DU BOT : {e}. Nouvelle tentative dans {retry_delay}s.")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_retry_delay)
 
 # Fonction pour pinger l'URL de Render et maintenir le service actif
 def ping_self():
