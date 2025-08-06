@@ -196,14 +196,15 @@ async def check_expired_events():
     print("Vérification des parties expirées...")
     events_ref = db.collection('events')
     now = datetime.now(timezone.utc)
-    for doc in events_ref.stream():
+    # Correction ici: Utilisation de async for pour itérer sur le StreamGenerator
+    async for doc in events_ref.stream(): 
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
         
         if isinstance(event_end_time, datetime) and event_end_time.replace(tzinfo=timezone.utc) < now:
             print(f"Partie '{event_data.get('name', doc.id)}' expirée. Fin de la partie...")
             await _end_event(doc.id)
-        await asyncio.sleep(60)
+    await asyncio.sleep(60)
 
 async def handle_event_participation(interaction: discord.Interaction, event_firestore_id: str, action: str):
     """
@@ -442,7 +443,10 @@ async def list_events_command(ctx):
     Affiche la liste de tous les événements actifs.
     """
     events_ref = db.collection('events')
-    active_events_docs = events_ref.stream()
+    # Correction ici: Utilisation de async for pour itérer sur le StreamGenerator
+    active_events_docs = []
+    async for doc in events_ref.stream():
+        active_events_docs.append(doc)
 
     events_list = []
     for doc in active_events_docs:
