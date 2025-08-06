@@ -64,6 +64,10 @@ def run_discord_bot():
 
     while True:
         try:
+            # Crée et définit un nouveau cycle d'événements pour ce thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
             print(f"Tentative de connexion du bot Discord... (prochaine tentative dans {retry_delay}s si échec)")
             bot.run(TOKEN)
             # Si cette ligne est atteinte, cela signifie que bot.run() s'est terminé.
@@ -88,6 +92,10 @@ def run_discord_bot():
             traceback.print_exc() # Affiche la trace complète de l'erreur
             time.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_retry_delay)
+        finally:
+            # S'assure que le cycle d'événements est fermé s'il a été créé
+            if 'loop' in locals() and not loop.is_closed():
+                loop.close()
 
 # Fonction pour pinger l'URL de Render et maintenir le service actif
 def ping_self():
@@ -96,6 +104,7 @@ def ping_self():
         try:
             # L'URL de votre service Render
             # Assurez-vous que cette URL est correcte pour votre déploiement Render
+            # REMPLACEZ 'https://poxel-bot.onrender.com' par l'URL réelle de votre service Render !
             response = requests.get('https://poxel-bot.onrender.com')
             print(f"Ping de l'URL réussi avec le statut {response.status_code}")
         except requests.exceptions.ConnectionError:
