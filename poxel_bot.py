@@ -12,7 +12,8 @@ import traceback # Gardé pour un meilleur débogage des erreurs de commande
 # ==============================================================================
 # === INSTRUCTIONS IMPORTANTES POUR LE DÉPLOIEMENT BASIQUE ===
 # ==============================================================================
-# Ce code est une version simplifiée, conçue pour un déploiement direct.
+# Ce code est une version simplifiée, conçue pour un déploiement direct sur
+# des plateformes comme Render.
 #
 # 1. DÉPENDANCES : Assurez-vous que les bibliothèques suivantes sont installées
 #    dans l'environnement de déploiement (via requirements.txt) :
@@ -25,6 +26,10 @@ import traceback # Gardé pour un meilleur débogage des erreurs de commande
 #    - DISCORD_TOKEN : Votre jeton Discord.
 #    - FIREBASE_CREDENTIALS_JSON : Le contenu complet du fichier
 #      'serviceAccountKey.json' sous forme de chaîne de caractères JSON.
+#
+# 3. MAINTIEN EN LIGNE 24/7 : Cette version ne contient PAS de logique interne
+#    pour maintenir le bot en ligne 24/7. Pour cela, vous devrez utiliser un
+#    service externe comme UptimeRobot qui pinguera l'URL de votre service Render.
 # ==============================================================================
 
 # --- Configuration Globale ---
@@ -510,7 +515,7 @@ async def help_command_func(ctx, bot_name: str = None):
     commands_info = {
         "create_event": {
             "description": "Crée une nouvelle partie avec un rôle temporaire et deux salons vocaux.",
-            "usage": ("`!create_event @rôle #salon_textuel durée(ex: 2h) max_participants étiquette_participants #salon_attente_vocal #salon_de_jeu_vocal Nom de la partie`\n"
+            "usage": ("`!create_event @rôle #salon_textuel durée(ex: 2h) max_participants étiquette_participants #salon_attente #salon_de_jeu Nom de la partie`\n"
                       "Ex: `!create_event @Joueur #salon-jeu 1h30m 4 joueurs #salle-d-attente #salon-partie Partie de Donjons`")
         },
         "end_event": {
