@@ -1,32 +1,18 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone # Ajout de timezone
 import asyncio
-import re  # Pour parser la durée
-import os  # Pour accéder aux variables d'environnement (le TOKEN)
-import json # Pour parser le JSON des identifiants Firebase
+import re # Pour parser la durée
+import os # Pour accéder aux variables d'environnement (le TOKEN)
+import threading
+from flask import Flask
+import requests # Ajouté pour les requêtes HTTP
+import time # Ajouté pour le temps d'attente
+import json # Ajouté pour parser le JSON des identifiants Firebase
+
+# Import des bibliothèques Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
-
-# ==============================================================================
-# === INSTRUCTIONS IMPORTANTES POUR L'HÉBERGEMENT HORS REPLIT ===
-# ==============================================================================
-# Ce code est optimisé pour fonctionner sur une plateforme d'hébergement
-# qui maintient les processus actifs en continu (comme Render, Heroku, etc.).
-#
-# 1. DÉPENDANCES : Assurez-vous que les bibliothèques suivantes sont installées
-#    dans l'environnement de déploiement :
-#    - discord.py
-#    - firebase-admin
-#    Un fichier `requirements.txt` est recommandé pour cela.
-#
-# 2. VARIABLES D'ENVIRONNEMENT : Le TOKEN Discord et les identifiants Firebase
-#    doivent être configurés comme des variables d'environnement sur votre
-#    service d'hébergement.
-#    - DISCORD_TOKEN : Votre jeton Discord.
-#    - FIREBASE_CREDENTIALS_JSON : Le contenu complet du fichier
-#      'serviceAccountKey.json' sous forme de chaîne de caractères JSON.
-# ==============================================================================
 
 # --- Configuration du Bot ---
 # Récupère le TOKEN depuis les variables d'environnement.
@@ -59,9 +45,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-intents.voice_states = True
+intents.voice_states = True # Ajouté pour les fonctionnalités vocales
 
 # Initialisation du bot avec un préfixe de commande '!' et les intents spécifiés.
+# Le help_command est désactivé pour que nous puissions créer notre propre commande d'aide.
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # --- Fonctions Utilitaires ---
@@ -132,6 +119,7 @@ async def on_ready():
     """
     print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
     print('Prêt à gérer les parties !')
+    # Démarre la tâche de vérification des événements expirés
     check_expired_events.start()
 
 @bot.event
@@ -146,14 +134,14 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send("| ERREUR | PERMISSION REFUSÉE", ephemeral=True)
     elif isinstance(error, commands.CommandNotFound):
-        pass
+        pass # Ignore les commandes qui n'existent pas
     else:
         print(f"Erreur de commande : {error}")
         await ctx.send(f"| ERREUR | INATTENDUE : `{error}`", ephemeral=True)
 
 # --- Commandes du Bot ---
 
-@bot.command(name='create_event', usage="<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_rendez-vous_vocal> <#salle_de_l'event_vocal> <Nom de la partie>")
+@bot.command(name='create_event', usage="<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#point_de_ralliement_vocal> <#salle_de_l'event_vocal> <Nom de la partie>")
 @commands.has_permissions(manage_roles=True)
 async def create_event(ctx, role: discord.Role, duration_str: str, max_participants: int, participant_label: str, waiting_room_channel: discord.VoiceChannel, destination_voice_channel: discord.VoiceChannel, *event_name_parts):
     """
@@ -181,8 +169,8 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
     @firestore.transactional
     async def create_event_in_transaction(transaction, event_name, ctx, role, duration_seconds, max_participants, participant_label, waiting_room_channel, destination_voice_channel):
         events_ref = db.collection('events')
-        event_query = events_ref.where('name', '==', event_name).stream()
-        existing_event_docs = [doc async for doc in event_query]
+        # Utilisation de get() au lieu de stream() pour une lecture transactionnelle
+        existing_event_docs = events_ref.where('name', '==', event_name).get(transaction=transaction)
         
         # Vérifie si un événement avec le même nom existe déjà
         if existing_event_docs:
@@ -240,12 +228,11 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
         embed = discord.Embed(
             title=f"NOUVELLE PARTIE : {event_name.upper()}",
             description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
-                        f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le **point de ralliement** et patienter d'être déplacé.",
+                        f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le **point de ralliement** {waiting_room_channel.mention} et patienter d'être déplacé.",
             color=discord.Color.from_rgb(255, 0, 154)
         )
         embed.add_field(name=f"**Participants ({max_participants})**", value="*Aucun participant inscrit pour le moment.*", inline=False)
         embed.add_field(name="**Rôle attribué :**", value=f"{role.mention}", inline=True)
-        embed.add_field(name="**Point de ralliement :**", value=f"{waiting_room_channel.mention}", inline=True)
         embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
         embed.set_footer(text="| POXEL | Appuyez sur START pour participer.")
         embed.timestamp = datetime.now()
@@ -500,7 +487,7 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             updated_event_data = event_ref.get().to_dict()
             
             await _update_event_embed(guild, updated_event_data, event_data['message_id'])
-            await interaction.followup.send(f"| INFO | BIENVENUE ! Vous avez reçu le rôle `{role.name}`. Veuillez vous rendre dans le **point de ralliement** et patienter d'être déplacé.", ephemeral=True)
+            await interaction.followup.send(f"| INFO | BIENVENUE ! Vous avez reçu le rôle `{role.name}`. Veuillez vous rendre dans le **point de ralliement** {guild.get_channel(event_data['waiting_room_channel_id']).mention} et patienter d'être déplacé.", ephemeral=True)
         except discord.Forbidden:
             await interaction.followup.send("| ERREUR | PERMISSIONS INSUFFISANTES pour donner le rôle.", ephemeral=True)
             return
@@ -623,11 +610,38 @@ async def help_command(ctx, bot_name: str = None):
     await ctx.send(embed=embed)
 
 
-# ==============================================================================
-# === DÉMARRAGE DU BOT ===
-# Exécute le bot Discord directement avec son TOKEN.
-# Le reste de la logique (serveur web, threading) est géré par la plateforme
-# d'hébergement.
-# ==============================================================================
-if __name__ == "__main__":
-    bot.run(TOKEN)
+# Code pour garder le bot en vie
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot Discord est en ligne !"
+
+def run_keep_alive():
+    # Démarre la tâche de ping interne pour garder le bot en vie
+    def ping_self():
+        while True:
+            try:
+                # REMPLACEZ 'VOTRE_URL_DE_DÉPLOIEMENT' par l'URL réelle de votre bot (par exemple, de Render, Replit, etc.)
+                # Exemple : https://mon-bot-poxel.onrender.com ou https://mon-bot-poxel.replit.app
+                response = requests.get('https://poxel-bot.onrender.com')
+                print(f"Ping de l'URL réussi avec le statut {response.status_code}")
+            except Exception as e:
+                print(f"Erreur lors du ping de l'URL : {e}")
+            time.sleep(300) # Attend 5 minutes
+
+    ping_thread = threading.Thread(target=ping_self)
+    ping_thread.daemon = True
+    ping_thread.start()
+    
+    app.run(host='0.0.0.0', port=8080)
+
+
+def start_server():
+    t = threading.Thread(target=run_keep_alive)
+    t.daemon = True
+    t.start()
+
+start_server()
+# Démarrage du bot
+bot.run(TOKEN)
