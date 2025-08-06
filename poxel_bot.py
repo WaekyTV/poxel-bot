@@ -7,35 +7,27 @@ import os
 import json
 import firebase_admin
 from firebase_admin import credentials, firestore
-import threading
-from flask import Flask
-import requests
-import time
-import traceback # Ajouté pour afficher la trace complète des erreurs
+import traceback # Gardé pour un meilleur débogage des erreurs de commande
 
 # ==============================================================================
-# === INSTRUCTIONS IMPORTANTES POUR L'HÉBERGEMENT HORS REPLIT ===
+# === INSTRUCTIONS IMPORTANTES POUR LE DÉPLOIEMENT BASIQUE ===
 # ==============================================================================
-# Ce code est optimisé pour fonctionner sur une plateforme d'hébergement
-# qui maintient les processus actifs en continu (comme Render, Heroku, etc.).
+# Ce code est une version simplifiée, conçue pour un déploiement direct.
 #
 # 1. DÉPENDANCES : Assurez-vous que les bibliothèques suivantes sont installées
-#    dans l'environnement de déploiement :
+#    dans l'environnement de déploiement (via requirements.txt) :
 #    - discord.py
 #    - firebase-admin
-#    - Flask
-#    - requests
-#    Un fichier `requirements.txt` est recommandé pour cela.
 #
 # 2. VARIABLES D'ENVIRONNEMENT : Le TOKEN Discord et les identifiants Firebase
 #    doivent être configurés comme des variables d'environnement sur votre
-#    service d'hébergement.
+#    service d'hébergement (ex: Render).
 #    - DISCORD_TOKEN : Votre jeton Discord.
 #    - FIREBASE_CREDENTIALS_JSON : Le contenu complet du fichier
 #      'serviceAccountKey.json' sous forme de chaîne de caractères JSON.
 # ==============================================================================
 
-# --- Configuration Globale (non liée à une instance de bot spécifique) ---
+# --- Configuration Globale ---
 TOKEN = os.environ.get('DISCORD_TOKEN')
 
 if not TOKEN:
@@ -66,7 +58,10 @@ intents.members = True
 intents.guilds = True
 intents.voice_states = True
 
-# --- Fonctions Utilitaires (restent globales) ---
+# Déclaration globale de l'instance du bot
+bot = None
+
+# --- Fonctions Utilitaires ---
 
 def parse_duration(duration_str: str) -> int:
     """
@@ -125,7 +120,7 @@ async def _update_event_embed(guild, event_data, message_id):
     except Exception as e:
         print(f"Erreur lors de la mise à jour du message de la partie : {e}")
 
-async def _end_event(event_doc_id: str, bot_instance): # Ajout de bot_instance
+async def _end_event(event_doc_id: str): # Suppression de bot_instance
     """
     Fonction interne pour terminer un événement, retirer les rôles et nettoyer.
     """
@@ -138,7 +133,7 @@ async def _end_event(event_doc_id: str, bot_instance): # Ajout de bot_instance
 
     event_data = event_doc.to_dict()
     event_name = event_data.get('name', 'Nom inconnu')
-    guild = bot_instance.get_guild(event_data['guild_id']) # Utilisation de bot_instance
+    guild = bot.get_guild(event_data['guild_id']) # Utilisation de la variable globale bot
     
     if not guild:
         print(f"Guilde non trouvée pour la partie {event_name} (ID: {event_doc_id})")
@@ -188,29 +183,27 @@ async def _end_event(event_doc_id: str, bot_instance): # Ajout de bot_instance
     event_ref.delete()
     print(f"Partie '{event_name}' (ID: {event_doc_id}) supprimée de Firestore.")
 
-async def check_expired_events_task(bot_instance): # Ajout de bot_instance
+@tasks.loop(minutes=1)
+async def check_expired_events(): # Suppression de bot_instance
     """
     Tâche en arrière-plan pour vérifier et terminer les événements expirés.
-    Cette tâche est lancée par on_ready sur le loop du bot.
     """
-    while True:
-        print("Vérification des parties expirées...")
-        events_ref = db.collection('events')
-        now = datetime.now(timezone.utc)
-        for doc in events_ref.stream():
-            event_data = doc.to_dict()
-            event_end_time = event_data.get('end_time')
-            
-            if isinstance(event_end_time, datetime) and event_end_time.replace(tzinfo=timezone.utc) < now:
-                print(f"Partie '{event_data.get('name', doc.id)}' expirée. Fin de la partie...")
-                await _end_event(doc.id, bot_instance) # Passage de bot_instance
+    print("Vérification des parties expirées...")
+    events_ref = db.collection('events')
+    now = datetime.now(timezone.utc)
+    for doc in events_ref.stream():
+        event_data = doc.to_dict()
+        event_end_time = event_data.get('end_time')
+        
+        if isinstance(event_end_time, datetime) and event_end_time.replace(tzinfo=timezone.utc) < now:
+            print(f"Partie '{event_data.get('name', doc.id)}' expirée. Fin de la partie...")
+            await _end_event(doc.id) # Utilise la fonction _end_event sans bot_instance
         await asyncio.sleep(60) # Exécution toutes les minutes
 
-async def handle_event_participation(interaction: discord.Interaction, event_firestore_id: str, action: str, bot_instance): # Ajout de bot_instance
+async def handle_event_participation(interaction: discord.Interaction, event_firestore_id: str, action: str): # Suppression de bot_instance
     """
     Gère les clics sur les boutons "START" et "EXIT".
     """
-    # Defer l'interaction pour avoir plus de temps pour répondre
     await interaction.response.defer(ephemeral=True)
 
     user = interaction.user
@@ -226,10 +219,9 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
     guild = interaction.guild
     role = guild.get_role(event_data['role_id'])
     
-    # Vérifie si l'événement est déjà terminé
     if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
         await interaction.followup.send("| ALERTE | LA DURÉE DE LA PARTIE EST EXPIRÉE. L'événement est clos.", ephemeral=True)
-        await _end_event(event_firestore_id, bot_instance) # Passage de bot_instance
+        await _end_event(event_firestore_id) # Utilise la fonction _end_event sans bot_instance
         return
 
     if not role:
@@ -280,11 +272,11 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             await interaction.followup.send(f"| ERREUR | INATTENDUE PENDANT LE DÉSENGAGEMENT : `{e}`", ephemeral=True)
             return
 
-# --- Fonctions de commande (sans décorateurs, seront ajoutées à l'instance du bot) ---
+# --- Fonctions de commande ---
 
-async def create_event_command(ctx, role: discord.Role, duration_str: str, max_participants: int, participant_label: str, waiting_room_channel: discord.VoiceChannel, destination_voice_channel: discord.VoiceChannel, *event_name_parts):
+async def create_event_command(ctx, role: discord.Role, text_channel: discord.TextChannel, duration_str: str, max_participants: int, participant_label: str, waiting_room_channel: discord.VoiceChannel, destination_voice_channel: discord.VoiceChannel, *event_name_parts):
     """
-    Crée une nouvelle partie avec un rôle temporaire, un salon de rendez-vous et une durée.
+    Crée une nouvelle partie avec un rôle temporaire, des salons et une durée.
     """
     event_name = " ".join(event_name_parts)
     if not event_name:
@@ -311,7 +303,7 @@ async def create_event_command(ctx, role: discord.Role, duration_str: str, max_p
             event_data = existing_event_doc.to_dict()
             
             if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
-                await _end_event(existing_event_doc.id, ctx.bot) # Passage de ctx.bot
+                await _end_event(existing_event_doc.id) # Utilise la fonction _end_event sans bot_instance
             else:
                 raise Exception(f"La partie '{event_name}' existe déjà et n'est pas terminée.")
 
@@ -319,7 +311,7 @@ async def create_event_command(ctx, role: discord.Role, duration_str: str, max_p
         event_data_firestore = {
             'name': event_name,
             'role_id': role.id,
-            'text_channel_id': ctx.channel.id,
+            'text_channel_id': text_channel.id,
             'waiting_room_channel_id': waiting_room_channel.id,
             'destination_voice_channel_id': destination_voice_channel.id,
             'end_time': end_time,
@@ -358,15 +350,15 @@ async def create_event_command(ctx, role: discord.Role, duration_str: str, max_p
 
         embed = discord.Embed(
             title=f"NOUVELLE PARTIE : {event_name.upper()}",
-            description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
-                        f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le **point de ralliement** et patienter d'être déplacé.",
+            description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**",
             color=discord.Color.from_rgb(255, 0, 154)
         )
-        embed.add_field(name=f"**Participants ({max_participants})**", value="*Aucun participant inscrit pour le moment.*", inline=False)
-        embed.add_field(name="**Rôle attribué :**", value=f"{role.mention}", inline=True)
-        embed.add_field(name="**Point de ralliement :**", value=f"{waiting_room_channel.mention}", inline=True)
+        embed.add_field(name=f"**Joueurs inscrits (0 / {max_participants})**", value="*Aucun joueur inscrit pour le moment.*", inline=False)
+        embed.add_field(name="**Rôle requis :**", value=f"{role.mention}", inline=True)
+        embed.add_field(name="**Salon de jeu :**", value=f"{text_channel.mention}", inline=True)
         embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
-        embed.set_footer(text="| POXEL | Appuyez sur START pour participer.")
+        embed.add_field(name="**Comment rejoindre ?**", value=f"1. Appuyez sur le bouton 'START'.\n2. Vous obtiendrez votre rôle et serez prêt à être déplacé vers le salon de jeu !", inline=False)
+        embed.set_footer(text="| P.O.X.E.L | Appuyez sur START pour participer.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
         embed.timestamp = datetime.now()
 
         await temp_message.edit(content=None, embed=embed, view=view)
@@ -393,12 +385,12 @@ async def end_event_command_func(ctx, *event_name_parts):
     event_doc_id = existing_event_docs[0].id
     
     await ctx.send(f">>> Fin de la partie '{event_name.upper()}' en cours...", ephemeral=True)
-    await _end_event(event_doc_id, ctx.bot) # Passage de ctx.bot
+    await _end_event(event_doc_id) # Utilise la fonction _end_event sans bot_instance
     await ctx.send(f"| INFO | PARTIE '{event_name.upper()}' TERMINÉE MANUELLEMENT", ephemeral=True)
 
 async def move_participants_command(ctx, *event_name_parts):
     """
-    Déplace tous les participants d'une partie vers la salle de l'événement.
+    Déplace tous les participants d'une partie vers le salon de jeu.
     """
     event_name = " ".join(event_name_parts)
     events_ref = db.collection('events')
@@ -430,9 +422,9 @@ async def move_participants_command(ctx, *event_name_parts):
                 print(f"Erreur lors du déplacement de {member.display_name}: {e}")
 
     if participants_count > 0:
-        await ctx.send(f"| INFO | {participants_count} PARTICIPANTS ONT ÉTÉ DÉPLACÉS", ephemeral=False)
+        await ctx.send(f"| INFO | {participants_count} JOUEURS ONT ÉTÉ DÉPLACÉS VERS {destination_channel.mention}", ephemeral=False)
     else:
-        await ctx.send(f"| INFO | AUCUN PARTICIPANT À DÉPLACER POUR LA PARTIE '{event_name.upper()}'", ephemeral=True)
+        await ctx.send(f"| INFO | AUCUN JOUEUR À DÉPLACER POUR LA PARTIE '{event_name.upper()}'", ephemeral=True)
 
 async def list_events_command(ctx):
     """
@@ -456,7 +448,7 @@ async def list_events_command(ctx):
     )
 
     for data in events_list:
-        guild = ctx.bot.get_guild(data['guild_id']) # Utilisation de ctx.bot
+        guild = bot.get_guild(data['guild_id'])
         role = guild.get_role(data['role_id']) if guild else None
         text_channel = guild.get_channel(data['text_channel_id']) if guild else None
         waiting_room_channel = guild.get_channel(data['waiting_room_channel_id']) if guild else None
@@ -474,7 +466,7 @@ async def list_events_command(ctx):
             ),
             inline=False
         )
-    embed.set_footer(text="| POXEL | Base de données des parties")
+    embed.set_footer(text="| P.O.X.E.L | Base de données des parties", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -486,12 +478,12 @@ async def intro_command_func(ctx):
         title="| P.O.X.E.L ASSISTANT |",
         description=(
             f"**Bonjour waeky !**\n"
-            f"Je suis POXEL, votre assistant personnel pour l'organisation de parties de jeux.\n"
+            f"Je suis Poxel, votre assistant personnel pour l'organisation de parties de jeux.\n"
             f"Utilisez `!help poxel` pour voir toutes mes commandes."
         ),
         color=discord.Color.from_rgb(145, 70, 255)
     )
-    embed.set_footer(text="Système en ligne.")
+    embed.set_footer(text="Système en ligne.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -505,15 +497,15 @@ async def help_command_func(ctx, bot_name: str = None):
 
     embed = discord.Embed(
         title="| MANUEL DU JOUEUR |",
-        description="Voici la liste des commandes disponibles pour POXEL :",
+        description="Voici la liste des commandes disponibles pour Poxel :",
         color=discord.Color.from_rgb(0, 158, 255)
     )
 
     commands_info = {
         "create_event": {
-            "description": "Crée une nouvelle partie avec un rôle temporaire, un salon de rendez-vous et une durée.",
-            "usage": ("`!create_event @rôle durée(ex: 2h) max_participants étiquette_participants #point_de_ralliement_vocal Nom de la partie`\n"
-                      "Ex: `!create_event @Joueur 1h30m 4 joueurs joueurs #point-de-ralliement Partie de Donjons`")
+            "description": "Crée une nouvelle partie avec un rôle temporaire et deux salons vocaux.",
+            "usage": ("`!create_event @rôle #salon_textuel durée(ex: 2h) max_participants étiquette_participants #salon_attente #salon_de_jeu Nom de la partie`\n"
+                      "Ex: `!create_event @Joueur #salon-jeu 1h30m 4 joueurs #salle-d-attente #salon-partie Partie de Donjons`")
         },
         "end_event": {
             "description": "Termine une partie en cours et retire les rôles aux participants.",
@@ -521,7 +513,7 @@ async def help_command_func(ctx, bot_name: str = None):
                      "Ex: `!end_event Partie de Donjons`"
         },
         "move_participants": {
-            "description": "Déplace tous les participants d'une partie vers la salle de l'événement.",
+            "description": "Déplace tous les participants d'une partie vers le salon de jeu.",
             "usage": "`!move_participants Nom de la partie`\n"
                      "Ex: `!move_participants Partie de Donjons`"
         },
@@ -530,7 +522,7 @@ async def help_command_func(ctx, bot_name: str = None):
             "usage": "`!list_events`"
         },
         "intro": {
-            "description": "Affiche la présentation de POXEL sur le serveur.",
+            "description": "Affiche la présentation de Poxel sur le serveur.",
             "usage": "`!intro`"
         },
         "help": {
@@ -549,7 +541,7 @@ async def help_command_func(ctx, bot_name: str = None):
             inline=False
         )
     
-    embed.set_footer(text="| POXEL | Bon jeu, waeky !")
+    embed.set_footer(text="| P.O.X.E.L | Bon jeu, waeky !", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -564,17 +556,19 @@ def create_and_configure_bot():
     """
     Crée et configure une nouvelle instance du bot Discord avec toutes ses commandes et événements.
     """
+    global bot # Permet d'assigner à la variable globale bot
     new_bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+    bot = new_bot # Assigne la nouvelle instance à la variable globale
 
     # Enregistrement des événements
-    @new_bot.event
+    @bot.event
     async def on_ready():
-        print(f'Connecté en tant que {new_bot.user.name} ({new_bot.user.id})')
+        print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
         print('Prêt à gérer les parties !')
-        # Démarre la tâche de vérification des événements expirés sur le loop de la nouvelle instance du bot
-        new_bot.loop.create_task(check_expired_events_task(new_bot))
+        # Démarre la tâche de vérification des événements expirés
+        check_expired_events.start()
 
-    @new_bot.event
+    @bot.event
     async def on_command_error(ctx, error):
         """
         Gère les erreurs de commande pour une meilleure expérience utilisateur.
@@ -589,10 +583,10 @@ def create_and_configure_bot():
             pass
         else:
             print(f"Erreur de commande : {error}")
-            traceback.print_exc() # Utilisation de traceback
+            traceback.print_exc()
             await ctx.send(f"| ERREUR | INATTENDUE : `{error}`", ephemeral=True)
 
-    @new_bot.event
+    @bot.event
     async def on_interaction(interaction: discord.Interaction):
         """
         Écoute toutes les interactions, y compris les clics sur les boutons.
@@ -601,83 +595,26 @@ def create_and_configure_bot():
             custom_id = interaction.data['custom_id']
             if custom_id.startswith("join_event_"):
                 event_firestore_id = custom_id.replace("join_event_", "")
-                await handle_event_participation(interaction, event_firestore_id, 'join', new_bot) # Passage de new_bot
+                await handle_event_participation(interaction, event_firestore_id, 'join')
             elif custom_id.startswith("leave_event_"):
                 event_firestore_id = custom_id.replace("leave_event_", "")
-                await handle_event_participation(interaction, event_firestore_id, 'leave', new_bot) # Passage de new_bot
-        await new_bot.process_commands(interaction)
+                await handle_event_participation(interaction, event_firestore_id, 'leave')
+        await bot.process_commands(interaction)
 
-    # Enregistrement des commandes sur la nouvelle instance du bot
-    new_bot.add_command(commands.Command(create_event_command, name='create_event', usage="<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_rendez-vous_vocal> <#salle_de_l'event_vocal> <Nom de la partie>"))
-    new_bot.add_command(commands.Command(end_event_command_func, name='end_event', usage='<Nom de la partie>'))
-    new_bot.add_command(commands.Command(move_participants_command, name='move_participants', usage='<Nom de la partie>'))
-    new_bot.add_command(commands.Command(list_events_command, name='list_events'))
-    new_bot.add_command(commands.Command(intro_command_func, name='intro'))
-    new_bot.add_command(commands.Command(help_command_func, name='help', usage='poxel'))
-    new_bot.add_command(commands.Command(ping_command_func, name='ping'))
+    # Enregistrement des commandes sur l'instance du bot
+    bot.add_command(commands.Command(create_event_command, name='create_event', usage="<@rôle> <#salon_textuel> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_attente_vocal> <#salon_de_jeu_vocal> <Nom de la partie>"))
+    bot.add_command(commands.Command(end_event_command_func, name='end_event', usage='<Nom de la partie>'))
+    bot.add_command(commands.Command(move_participants_command, name='move_participants', usage='<Nom de la partie>'))
+    bot.add_command(commands.Command(list_events_command, name='list_events'))
+    bot.add_command(commands.Command(intro_command_func, name='intro'))
+    bot.add_command(commands.Command(help_command_func, name='help', usage='poxel'))
+    bot.add_command(commands.Command(ping_command_func, name='ping'))
 
-    return new_bot
+    return bot
 
-# --- Logique d'exécution principale ---
-def run_bot_with_retries():
-    """
-    Fonction pour exécuter le bot Discord dans un thread séparé avec une logique de retry.
-    Crée une nouvelle instance du bot à chaque tentative de connexion.
-    """
-    retry_delay = 5 # Délai initial en secondes
-    max_retry_delay = 600 # Délai maximum (10 minutes)
-
-    while True:
-        try:
-            # Crée un nouveau loop d'événements pour ce thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            # Crée une instance de bot fraîche pour chaque tentative de connexion
-            current_bot_instance = create_and_configure_bot()
-
-            print(f"Tentative de connexion du bot Discord... (prochaine tentative dans {retry_delay}s si échec)")
-            current_bot_instance.run(TOKEN)
-            
-            print("Le bot Discord s'est déconnecté ou l'exécution de bot.run() s'est terminée. Tentative de reconnexion...")
-            retry_delay = 5 # Réinitialise le délai après une déconnexion ou une fin d'exécution
-            time.sleep(retry_delay) # Attend avant de retenter la connexion
-        except discord.errors.HTTPException as e:
-            if e.status == 429: # Too Many Requests
-                print(f"ERREUR 429 (Too Many Requests) : Discord nous limite. Nouvelle tentative dans {retry_delay}s.")
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, max_retry_delay) # Augmente le délai de manière exponentielle
-            else:
-                print(f"ERREUR HTTP Discord inattendue ({e.status}) : {e}. Nouvelle tentative dans {retry_delay}s.")
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, max_retry_delay)
-        except discord.LoginFailure:
-            print("ERREUR DE CONNEXION : Jeton Discord invalide. Veuillez vérifier votre DISCORD_TOKEN. Arrêt du bot.")
-            break # Arrête le thread si le jeton est invalide
-        except Exception as e:
-            print(f"ERREUR INATTENDUE LORS DE L'EXÉCUTION DU BOT : {e}.")
-            traceback.print_exc() # Affiche la trace complète de l'erreur
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, max_retry_delay)
-        finally:
-            # S'assure que le loop d'événements est fermé s'il a été créé
-            if 'loop' in locals() and not loop.is_closed():
-                loop.close()
-
-# Flask App pour le Keep-Alive
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    """Point d'accès simple pour vérifier que le serveur Flask est en ligne."""
-    return "Bot Discord POXEL est en ligne et opérationnel !"
-
+# --- Démarrage du Bot ---
 if __name__ == "__main__":
-    # Démarre le bot Discord sur un thread séparé.
-    discord_bot_thread = threading.Thread(target=run_bot_with_retries)
-    discord_bot_thread.daemon = True
-    discord_bot_thread.start()
-
-    # Exécute l'application Flask sur le thread principal.
-    # C'est cette exécution qui est détectée par Render pour maintenir le service actif.
-    app.run(host='0.0.0.0', port=8080)
+    # Crée et configure l'instance du bot
+    create_and_configure_bot()
+    # Démarre le bot Discord
+    bot.run(TOKEN)
