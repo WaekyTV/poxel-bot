@@ -1,31 +1,31 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import asyncio
 import re  # Pour parser la durée
 import os  # Pour accéder aux variables d'environnement (le TOKEN)
-import json # Pour parser le JSON des identifiants Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ==============================================================================
 # === INSTRUCTIONS IMPORTANTES POUR L'HÉBERGEMENT HORS REPLIT ===
 # ==============================================================================
-# Ce code est optimisé pour fonctionner sur une plateforme d'hébergement
+# Ce code est simplifié pour fonctionner sur une plateforme d'hébergement
 # qui maintient les processus actifs en continu (comme Render, Heroku, etc.).
 #
 # 1. DÉPENDANCES : Assurez-vous que les bibliothèques suivantes sont installées
 #    dans l'environnement de déploiement :
 #    - discord.py
 #    - firebase-admin
-#    Un fichier `requirements.txt` est recommandé pour cela.
+#    Vous devrez peut-être créer un fichier `requirements.txt` avec ces noms
+#    pour que la plateforme les installe automatiquement.
 #
-# 2. VARIABLES D'ENVIRONNEMENT : Le TOKEN Discord et les identifiants Firebase
-#    doivent être configurés comme des variables d'environnement sur votre
+# 2. FICHIER FIREBASE : Assurez-vous que le fichier 'serviceAccountKey.json'
+#    est présent dans le même dossier que ce script.
+#
+# 3. VARIABLES D'ENVIRONNEMENT : Le TOKEN Discord doit être configuré
+#    comme une variable d'environnement nommée 'DISCORD_TOKEN' sur votre
 #    service d'hébergement.
-#    - DISCORD_TOKEN : Votre jeton Discord.
-#    - FIREBASE_CREDENTIALS_JSON : Le contenu complet du fichier
-#      'serviceAccountKey.json' sous forme de chaîne de caractères JSON.
 # ==============================================================================
 
 # --- Configuration du Bot ---
@@ -38,20 +38,13 @@ if not TOKEN:
 
 # --- Configuration Firebase ---
 try:
-    # Récupère les identifiants depuis la variable d'environnement
-    firebase_credentials_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
-    if not firebase_credentials_json:
-        print("ERREUR : La variable d'environnement 'FIREBASE_CREDENTIALS_JSON' est manquante.")
-        exit()
-
-    cred_dict = json.loads(firebase_credentials_json)
-    cred = credentials.Certificate(cred_dict)
+    cred = credentials.Certificate('serviceAccountKey.json')
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("Firebase Admin SDK initialisé avec succès.")
 except Exception as e:
     print(f"ERREUR lors de l'initialisation de Firebase Admin SDK: {e}")
-    print("Assurez-vous que 'FIREBASE_CREDENTIALS_JSON' est valide.")
+    print("Assurez-vous que 'serviceAccountKey.json' est présent et valide.")
     exit()
 
 # Les "intents" sont les permissions que le bot demande à Discord.
@@ -107,12 +100,12 @@ async def _update_event_embed(guild, event_data, message_id):
             if member:
                 participants_mentions.append(member.mention)
         
-        participants_field_value = "\n".join(participants_mentions) if participants_mentions else "*Aucun participant inscrit pour le moment.*"
+        players_field_value = "\n".join(participants_mentions) if participants_mentions else "*Aucun joueur inscrit pour le moment.*"
 
         embed.set_field_at(
             0,
-            name=f"**Participants ({len(participants_mentions)} / {event_data['max_participants']})**",
-            value=participants_field_value,
+            name=f"**Joueurs inscrits ({len(participants_mentions)} / {event_data['max_participants']})**",
+            value=players_field_value,
             inline=False
         )
 
@@ -153,14 +146,11 @@ async def on_command_error(ctx, error):
 
 # --- Commandes du Bot ---
 
-@bot.command(name='create_event', usage="<@rôle> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_attente_vocal> <#salle_de_l'event_vocal> <Nom de la partie>")
+@bot.command(name='create_event', usage='<@rôle> <#salon_textuel> <durée (ex: 2h, 30m)> <max_participants> <étiquette_participants> <#salon_attente_vocal> <#salon_de_jeu_vocal> <Nom de la partie>')
 @commands.has_permissions(manage_roles=True)
-async def create_event(ctx, role: discord.Role, duration_str: str, max_participants: int, participant_label: str, waiting_room_channel: discord.VoiceChannel, destination_voice_channel: discord.VoiceChannel, *event_name_parts):
+async def create_event(ctx, role: discord.Role, text_channel: discord.TextChannel, duration_str: str, max_participants: int, participant_label: str, waiting_room_channel: discord.VoiceChannel, destination_voice_channel: discord.VoiceChannel, *event_name_parts):
     """
     Crée une nouvelle partie avec un rôle temporaire, des salons et une durée.
-
-    Exemple d'utilisation :
-    `!create_event @Joueur 1h30m 4 joueurs #salle-d-attente #salle-de-l'event Partie de Donjons`
     """
     event_name = " ".join(event_name_parts)
     if not event_name:
@@ -169,21 +159,12 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
 
     events_ref = db.collection('events')
     existing_event_docs = events_ref.where('name', '==', event_name).get()
-    
     if existing_event_docs:
-        existing_event_doc = existing_event_docs[0]
-        event_data = existing_event_doc.to_dict()
-        
-        # Vérifie si l'événement existant est expiré
-        if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
-            await ctx.send(f"| INFO | L'ancien événement '{event_name}' est expiré. Clôture automatique en cours pour en créer un nouveau...", ephemeral=True)
-            await _end_event(existing_event_doc.id)
-        else:
-            await ctx.send(f"| ERREUR | LA PARTIE '{event_name}' EXISTE DÉJÀ ET N'EST PAS TERMINÉE", ephemeral=True)
-            return
+        await ctx.send(f"| ERREUR | LA PARTIE '{event_name}' EXISTE DÉJÀ", ephemeral=True)
+        return
 
     if max_participants <= 0:
-        await ctx.send("| ERREUR | CAPACITÉ DE PARTICIPANTS INVALIDE", ephemeral=True)
+        await ctx.send("| ERREUR | CAPACITÉ DE JOUEURS INVALIDE", ephemeral=True)
         return
 
     try:
@@ -192,13 +173,13 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
         await ctx.send(f"| ERREUR | {str(e).upper()}", ephemeral=True)
         return
 
-    end_time = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+    end_time = datetime.now() + timedelta(seconds=duration_seconds)
     temp_message = await ctx.send(">>> Chargement de la partie...")
 
     event_data_firestore = {
         'name': event_name,
         'role_id': role.id,
-        'text_channel_id': ctx.channel.id, # Utilise le salon où la commande a été lancée
+        'text_channel_id': text_channel.id,
         'waiting_room_channel_id': waiting_room_channel.id,
         'destination_voice_channel_id': destination_voice_channel.id,
         'end_time': end_time,
@@ -230,16 +211,15 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
 
     embed = discord.Embed(
         title=f"NOUVELLE PARTIE : {event_name.upper()}",
-        description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
-                    f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le salon vocal de la **salle d'attente** et patienter d'être déplacé.",
+        description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**",
         color=discord.Color.from_rgb(255, 0, 154)
     )
-    embed.add_field(name=f"**Participants ({max_participants})**", value="*Aucun participant inscrit pour le moment.*", inline=False)
-    embed.add_field(name="**Rôle attribué :**", value=f"{role.mention}", inline=True)
-    embed.add_field(name="**Salle d'attente :**", value=f"{waiting_room_channel.mention}", inline=True)
-    embed.add_field(name="**Salle de l'event :**", value=f"{destination_voice_channel.mention}", inline=True)
+    embed.add_field(name=f"**Joueurs inscrits (0 / {max_participants})**", value="*Aucun joueur inscrit pour le moment.*", inline=False)
+    embed.add_field(name="**Rôle requis :**", value=f"{role.mention}", inline=True)
+    embed.add_field(name="**Salon de jeu :**", value=f"{text_channel.mention}", inline=True)
     embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
-    embed.set_footer(text="| P.O.X.E.L | Appuyez sur START pour participer.")
+    embed.add_field(name="**Comment rejoindre ?**", value=f"1. Appuyez sur le bouton 'START'.\n2. Vous obtiendrez votre rôle et serez prêt à être déplacé vers le salon de jeu !", inline=False)
+    embed.set_footer(text="| P.O.X.E.L | Appuyez sur START pour participer.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
 
     await temp_message.edit(content=None, embed=embed, view=view)
@@ -281,10 +261,12 @@ async def _end_event(event_doc_id: str):
             except Exception as e:
                 print(f"Erreur lors du retrait du rôle à {member.display_name}: {e}")
 
-    # Envoie le message de fin de partie avant de supprimer l'événement
+    event_ref.delete()
+    print(f"Partie '{event_name}' (ID: {event_doc_id}) supprimée de Firestore.")
+
     if text_channel:
         try:
-            await text_channel.send(f"| ALERTE | L'événement **'{event_name.upper()}'** est maintenant clos.")
+            await text_channel.send(f"| ALERTE | FIN DE PARTIE : '{event_name.upper()}'")
         except discord.Forbidden:
             print(f"Permissions insuffisantes pour envoyer un message dans le salon {text_channel.name}")
     else:
@@ -298,16 +280,12 @@ async def _end_event(event_doc_id: str):
             embed.title = f"PARTIE TERMINÉE : {event_name.upper()}"
             embed.description = f"**La partie est terminée. Bien joué !**"
             embed.clear_fields()
-            embed.add_field(name="**Participants finaux :**", value=f"{len(event_data.get('participants', []))} / {event_data['max_participants']} {event_data['participant_label']}", inline=False)
+            embed.add_field(name="**Score final :**", value=f"{len(event_data.get('participants', []))} / {event_data['max_participants']} {event_data['participant_label']}", inline=False)
             await event_message.edit(embed=embed, view=None)
     except discord.NotFound:
         print(f"Message de la partie {event_name} (ID: {event_doc_id}) non trouvé sur Discord. Il a peut-être été supprimé manuellement.")
     except Exception as e:
         print(f"Erreur lors de la mise à jour du message de la partie : {e}")
-
-    # Supprime l'événement de Firestore une fois le nettoyage terminé
-    event_ref.delete()
-    print(f"Partie '{event_name}' (ID: {event_doc_id}) supprimée de Firestore.")
 
 
 @bot.command(name='end_event', usage='<Nom de la partie>')
@@ -335,7 +313,7 @@ async def end_event_command(ctx, *event_name_parts):
 @commands.has_permissions(move_members=True)
 async def move_participants(ctx, *event_name_parts):
     """
-    Déplace tous les participants d'une partie vers la salle de l'événement.
+    Déplace tous les participants d'une partie vers le salon de jeu.
     """
     event_name = " ".join(event_name_parts)
     events_ref = db.collection('events')
@@ -367,9 +345,9 @@ async def move_participants(ctx, *event_name_parts):
                 print(f"Erreur lors du déplacement de {member.display_name}: {e}")
 
     if participants_count > 0:
-        await ctx.send(f"| INFO | {participants_count} PARTICIPANTS ONT ÉTÉ DÉPLACÉS VERS {destination_channel.mention}", ephemeral=False)
+        await ctx.send(f"| INFO | {participants_count} JOUEURS ONT ÉTÉ DÉPLACÉS VERS {destination_channel.mention}", ephemeral=False)
     else:
-        await ctx.send(f"| INFO | AUCUN PARTICIPANT À DÉPLACER POUR LA PARTIE '{event_name.upper()}'", ephemeral=True)
+        await ctx.send(f"| INFO | AUCUN JOUEUR À DÉPLACER POUR LA PARTIE '{event_name.upper()}'", ephemeral=True)
 
 
 @bot.command(name='list_events')
@@ -399,22 +377,21 @@ async def list_events(ctx):
         role = guild.get_role(data['role_id']) if guild else None
         text_channel = guild.get_channel(data['text_channel_id']) if guild else None
         waiting_room_channel = guild.get_channel(data['waiting_room_channel_id']) if guild else None
-        destination_voice_channel = guild.get_channel(data['destination_voice_channel_id']) if guild else None
 
         participants_count = len(data.get('participants', []))
         
         embed.add_field(
             name=f"🎮 {data['name'].upper()}",
             value=(
-                f"**Rôle attribué :** {role.mention if role else 'NON TROUVÉ'}\n"
-                f"**Salle d'attente :** {waiting_room_channel.mention if waiting_room_channel else 'NON TROUVÉ'}\n"
-                f"**Salle de l'event :** {destination_voice_channel.mention if destination_voice_channel else 'NON TROUVÉ'}\n"
-                f"**Participants :** {participants_count} / {data['max_participants']} {data['participant_label']}\n"
+                f"**Rôle requis :** {role.mention if role else 'NON TROUVÉ'}\n"
+                f"**Salon de jeu :** {text_channel.mention if text_channel else 'NON TROUVÉ'}\n"
+                f"**Salon d'attente :** {waiting_room_channel.mention if waiting_room_channel else 'NON TROUVÉ'}\n"
+                f"**Joueurs inscrits :** {participants_count} / {data['max_participants']} {data['participant_label']}\n"
                 f"**Fin de partie :** <t:{int(data['end_time'].timestamp())}:R>"
             ),
             inline=False
         )
-    embed.set_footer(text="| P.O.X.E.L | Base de données des parties")
+    embed.set_footer(text="| P.O.X.E.L | Base de données des parties", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -434,7 +411,7 @@ async def intro_command(ctx):
         ),
         color=discord.Color.from_rgb(145, 70, 255)
     )
-    embed.set_footer(text="Système en ligne.")
+    embed.set_footer(text="Système en ligne.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -443,30 +420,21 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
     """
     Gère les clics sur les boutons "START" et "EXIT".
     """
-    # Defer l'interaction pour avoir plus de temps pour répondre
-    await interaction.response.defer(ephemeral=True)
-
     user = interaction.user
     event_ref = db.collection('events').document(event_firestore_id)
     event_doc = event_ref.get()
 
     if not event_doc.exists:
-        await interaction.followup.send("| ALERTE | CETTE PARTIE N'EST PLUS ACTIVE", ephemeral=True)
+        await interaction.response.send_message("| ALERTE | CETTE PARTIE N'EST PLUS ACTIVE", ephemeral=True)
         return
 
     event_data = event_doc.to_dict()
     event_name = event_data.get('name', 'Nom inconnu')
     guild = interaction.guild
     role = guild.get_role(event_data['role_id'])
-    
-    # Vérifie si l'événement est déjà terminé
-    if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
-        await interaction.followup.send("| ALERTE | LA DURÉE DE LA PARTIE EST EXPIRÉE. L'événement est clos.", ephemeral=True)
-        await _end_event(event_firestore_id)
-        return
 
     if not role:
-        await interaction.followup.send("| ERREUR | RÔLE DE PARTICIPANT INTROUVABLE", ephemeral=True)
+        await interaction.response.send_message("| ERREUR | RÔLE DE JOUEUR INTROUVABLE", ephemeral=True)
         return
 
     current_participants = set(event_data.get('participants', []))
@@ -474,10 +442,10 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
     
     if action == 'join':
         if user.id in current_participants:
-            await interaction.followup.send("| ALERTE | VOUS ÊTES DÉJÀ INSCRIT À LA PARTIE", ephemeral=True)
+            await interaction.response.send_message("| ALERTE | VOUS ÊTES DÉJÀ DANS LA PARTIE", ephemeral=True)
             return
         if len(current_participants) >= max_participants:
-            await interaction.followup.send("| ALERTE | NOMBRE DE PARTICIPANTS MAXIMAL ATTEINT", ephemeral=True)
+            await interaction.response.send_message("| ALERTE | NOMBRE DE JOUEURS MAXIMAL ATTEINT", ephemeral=True)
             return
 
         try:
@@ -486,17 +454,17 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             updated_event_data = event_ref.get().to_dict()
             
             await _update_event_embed(guild, updated_event_data, event_data['message_id'])
-            await interaction.followup.send(f"| INFO | BIENVENUE ! Vous avez reçu le rôle `{role.name}`. Veuillez vous rendre dans le salon vocal **d'attente** et patienter d'être déplacé.", ephemeral=True)
+            await interaction.response.send_message(f"| INFO | BIENVENUE DANS LA PARTIE ! Votre rôle '{role.name}' a été activé. Dirigez-vous vers le salon vocal de la partie pour commencer.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.followup.send("| ERREUR | PERMISSIONS INSUFFISANTES pour donner le rôle.", ephemeral=True)
+            await interaction.response.send_message("| ERREUR | PERMISSIONS INSUFFISANTES pour donner le rôle.", ephemeral=True)
             return
         except Exception as e:
-            await interaction.followup.send(f"| ERREUR | INATTENDUE PENDANT L'INSCRIPTION : `{e}`", ephemeral=True)
+            await interaction.response.send_message(f"| ERREUR | INATTENDUE PENDANT L'INSCRIPTION : `{e}`", ephemeral=True)
             return
 
     elif action == 'leave':
         if user.id not in current_participants:
-            await interaction.followup.send("| ALERTE | VOUS NE PARTICIPEZ PAS À CETTE PARTIE", ephemeral=True)
+            await interaction.response.send_message("| ALERTE | VOUS NE PARTICIPEZ PAS À CETTE PARTIE", ephemeral=True)
             return
 
         try:
@@ -505,12 +473,12 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
             updated_event_data = event_ref.get().to_dict()
             
             await _update_event_embed(guild, updated_event_data, event_data['message_id'])
-            await interaction.followup.send(f"| INFO | À LA PROCHAINE FOIS, {user.display_name.upper()}.", ephemeral=True)
+            await interaction.response.send_message(f"| INFO | À LA PROCHAINE FOIS, {user.display_name.upper()}.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.followup.send("| ERREUR | PERMISSIONS INSUFFISANTES pour retirer le rôle.", ephemeral=True)
+            await interaction.response.send_message("| ERREUR | PERMISSIONS INSUFFISANTES pour retirer le rôle.", ephemeral=True)
             return
         except Exception as e:
-            await interaction.followup.send(f"| ERREUR | INATTENDUE PENDANT LE DÉSENGAGEMENT : `{e}`", ephemeral=True)
+            await interaction.response.send_message(f"| ERREUR | INATTENDUE PENDANT LE DÉSENGAGEMENT : `{e}`", ephemeral=True)
             return
 
 
@@ -538,13 +506,12 @@ async def check_expired_events():
     """
     print("Vérification des parties expirées...")
     events_ref = db.collection('events')
-    now = datetime.now(timezone.utc)
+    now = datetime.now()
     for doc in events_ref.stream():
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
         
-        # S'assure que la date de fin est bien de type datetime et est en UTC pour la comparaison
-        if isinstance(event_end_time, datetime) and event_end_time.replace(tzinfo=timezone.utc) < now:
+        if event_end_time and event_end_time < now:
             print(f"Partie '{event_data.get('name', doc.id)}' expirée. Fin de la partie...")
             await _end_event(doc.id)
 
@@ -567,8 +534,8 @@ async def help_command(ctx, bot_name: str = None):
     commands_info = {
         "create_event": {
             "description": "Crée une nouvelle partie avec un rôle temporaire et deux salons vocaux.",
-            "usage": ("`!create_event @rôle durée(ex: 2h) max_participants étiquette_participants #salon_attente #salle_de_l'event Nom de la partie`\n"
-                      "Ex: `!create_event @Joueur 1h30m 4 joueurs #salle-d-attente #salle-de-l'event Partie de Donjons`")
+            "usage": ("`!create_event @rôle #salon_textuel durée(ex: 2h) max_participants étiquette_participants #salon_attente #salon_de_jeu Nom de la partie`\n"
+                      "Ex: `!create_event @Joueur #salon-jeu 1h30m 4 joueurs #salle-d-attente #salon-partie Partie de Donjons`")
         },
         "end_event": {
             "description": "Termine une partie en cours et retire les rôles aux participants.",
@@ -576,7 +543,7 @@ async def help_command(ctx, bot_name: str = None):
                      "Ex: `!end_event Partie de Donjons`"
         },
         "move_participants": {
-            "description": "Déplace tous les participants d'une partie vers la salle de l'événement.",
+            "description": "Déplace tous les participants d'une partie vers le salon de jeu.",
             "usage": "`!move_participants Nom de la partie`\n"
                      "Ex: `!move_participants Partie de Donjons`"
         },
@@ -604,7 +571,7 @@ async def help_command(ctx, bot_name: str = None):
             inline=False
         )
     
-    embed.set_footer(text="| P.O.X.E.L | Bon jeu, waeky !")
+    embed.set_footer(text="| P.O.X.E.L | Bon jeu, waeky !", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
