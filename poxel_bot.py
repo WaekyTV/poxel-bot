@@ -4,36 +4,47 @@ from datetime import datetime, timedelta
 import asyncio
 import re
 import os
+import json # On a besoin de la bibliothèque 'json' pour écrire le fichier
 
 # Import des bibliothèques Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 # --- Configuration du Bot ---
-# On récupère le TOKEN depuis les variables d'environnement de Replit pour des raisons de sécurité.
-# Pour le configurer, va dans l'onglet 'Secrets' de Replit et ajoute une clé 'DISCORD_TOKEN' avec ton token.
 TOKEN = os.environ['DISCORD_TOKEN']
 
 # --- Configuration Firebase ---
-# Le fichier 'serviceAccountKey.json' doit être dans le même dossier que ce script.
+# On va créer le fichier serviceAccountKey.json à partir de la variable d'environnement
+firebase_key_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY')
+firebase_key_filename = 'serviceAccountKey.json'
+
+if firebase_key_json:
+    try:
+        with open(firebase_key_filename, 'w') as f:
+            f.write(firebase_key_json)
+        print("Fichier serviceAccountKey.json créé avec succès à partir de la variable d'environnement.")
+    except Exception as e:
+        print(f"Erreur lors de la création du fichier Firebase : {e}")
+        exit()
+else:
+    print("Variable d'environnement 'FIREBASE_SERVICE_ACCOUNT_KEY' non trouvée.")
+    exit()
+
 try:
-    # On initialise la connexion à Firebase en utilisant le fichier de clé.
-    cred = credentials.Certificate('serviceAccountKey.json')
+    cred = credentials.Certificate(firebase_key_filename)
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("Firebase Admin SDK initialisé avec succès.")
 except Exception as e:
     print(f"Erreur lors de l'initialisation de Firebase Admin SDK: {e}")
     print("Assure-toi que 'serviceAccountKey.json' est présent et valide.")
-    # Quitter si Firebase ne peut pas être initialisé, car le bot ne fonctionnera pas correctement.
     exit()
-
 
 # Les "intents" sont les permissions que ton bot demande à Discord.
 intents = discord.Intents.default()
-intents.message_content = True # Nécessaire pour lire le contenu des messages (commandes)
-intents.members = True         # Nécessaire pour gérer les rôles des membres
-intents.guilds = True          # Nécessaire pour accéder aux informations du serveur
+intents.message_content = True
+intents.members = True
+intents.guilds = True
 
 # Initialisation du bot avec un préfixe de commande (ex: !create_event)
 # Désactiver l'aide par défaut de discord.py pour la remplacer par la nôtre
@@ -47,7 +58,6 @@ def parse_duration(duration_str: str) -> int:
     Supporte les heures (h), minutes (m) et secondes (s).
     """
     total_seconds = 0
-    # Regex pour trouver les nombres suivis de h, m, ou s
     matches = re.findall(r'(\d+)([hms])', duration_str.lower())
 
     if not matches:
@@ -72,7 +82,6 @@ async def on_ready():
     """
     print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
     print('Prêt à gérer les événements !')
-    # Démarrer la tâche de vérification des événements expirés au démarrage du bot
     check_expired_events.start()
 
 @bot.event
@@ -87,7 +96,7 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send("Accès refusé : Vous n'avez pas les permissions nécessaires pour exécuter cette commande (Gérer les rôles).", ephemeral=True)
     elif isinstance(error, commands.CommandNotFound):
-        pass # Ignorer les commandes non trouvées
+        pass
     else:
         print(f"Erreur de commande : {error}")
         await ctx.send(f"Erreur du système : Une erreur inattendue s'est produite : `{error}`", ephemeral=True)
@@ -106,7 +115,6 @@ async def create_event(ctx, role: discord.Role, channel: discord.TextChannel, du
         await ctx.send("Veuillez spécifier un nom pour l'événement.", ephemeral=True)
         return
 
-    # Vérifier si l'événement existe déjà dans Firestore
     events_ref = db.collection('events')
     existing_event = events_ref.where('name', '==', event_name).get()
     if existing_event:
@@ -125,25 +133,22 @@ async def create_event(ctx, role: discord.Role, channel: discord.TextChannel, du
 
     end_time = datetime.now() + timedelta(seconds=duration_seconds)
 
-    # Créer un message temporaire pour obtenir l'ID du message avant de le mettre à jour
     temp_message = await ctx.send("Création de l'événement en cours...")
 
-    # Sauvegarder l'événement dans Firestore
     event_data_firestore = {
         'name': event_name,
         'role_id': role.id,
         'channel_id': channel.id,
-        'end_time': end_time, # Firestore gère les objets datetime nativement
+        'end_time': end_time,
         'max_participants': max_participants,
         'participant_label': participant_label,
-        'participants': [], # Liste vide pour Firestore
-        'message_id': temp_message.id, # L'ID du message Discord
+        'participants': [],
+        'message_id': temp_message.id,
         'guild_id': ctx.guild.id
     }
     doc_ref = db.collection('events').add(event_data_firestore)
-    event_firestore_id = doc_ref[1].id # L'ID du document Firestore
+    event_firestore_id = doc_ref[1].id
 
-    # Création des boutons avec des labels simples pour un aspect rétro
     view = discord.ui.View(timeout=None)
     
     join_button = discord.ui.Button(
@@ -160,7 +165,6 @@ async def create_event(ctx, role: discord.Role, channel: discord.TextChannel, du
     view.add_item(join_button)
     view.add_item(leave_button)
 
-    # Mettre à jour le message Discord avec les infos complètes et les boutons
     embed = discord.Embed(
         title=f"NEW EVENT: {event_name}",
         description=(
@@ -170,7 +174,7 @@ async def create_event(ctx, role: discord.Role, channel: discord.TextChannel, du
             f"**[CAPACITE]  :** **0** / {max_participants} {participant_label}\n\n"
             "Cliquez sur les boutons pour rejoindre ou quitter la partie !"
         ),
-        color=discord.Color.from_rgb(0, 158, 255) # Bleu 009EFF
+        color=discord.Color.from_rgb(0, 158, 255)
     )
     embed.set_footer(text="[GESTION PAR POXEL] | MODE RETRO | WAEKY")
     embed.timestamp = datetime.now()
@@ -197,13 +201,12 @@ async def _end_event(event_doc_id: str):
     
     if not guild:
         print(f"Guilde non trouvée pour l'événement {event_name} (ID: {event_doc_id})")
-        event_ref.delete() # Supprimer de Firestore si la guilde n'existe plus
+        event_ref.delete()
         return
 
     role = guild.get_role(event_data['role_id'])
     channel = guild.get_channel(event_data['channel_id'])
 
-    # Retirer le rôle à tous les participants
     for user_id in list(event_data.get('participants', [])):
         member = guild.get_member(user_id)
         if member and role:
@@ -215,11 +218,9 @@ async def _end_event(event_doc_id: str):
             except Exception as e:
                 print(f"Erreur lors du retrait du rôle à {member.display_name}: {e}")
 
-    # Supprimer l'événement de Firestore
     event_ref.delete()
     print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
 
-    # Envoyer un message de fin d'événement
     if channel:
         try:
             await channel.send(f"L'événement **'{event_name}'** est maintenant terminé. Le rôle {role.mention if role else 'temporaire'} a été retiré aux participants.")
@@ -228,19 +229,18 @@ async def _end_event(event_doc_id: str):
     else:
         print(f"Salon de l'événement {event_name} non trouvé.")
 
-    # Mettre à jour le message de l'événement pour indiquer qu'il est terminé
     try:
         event_message = await channel.fetch_message(event_data['message_id'])
         if event_message:
             embed = event_message.embeds[0]
-            embed.color = discord.Color.from_rgb(150, 0, 0) # Couleur rouge foncé pour la fin
+            embed.color = discord.Color.from_rgb(150, 0, 0)
             embed.title = f"EVENT TERMINE: {event_name}"
             embed.description = f"**[FIN]**\n\n" \
                                 f"**[ROLE]      :** {role.mention if role else 'Non specifie'}\n" \
                                 f"**[SALON]     :** {channel.mention if channel else 'Non specifie'}\n" \
                                 f"**[CAPACITE]  :** {len(event_data.get('participants', []))} / {event_data['max_participants']} {event_data['participant_label']}\n"
             embed.set_footer(text="[GESTION PAR POXEL] | EVENEMENT EXPIRE | WAEKY")
-            await event_message.edit(embed=embed, view=None) # view=None pour retirer les boutons
+            await event_message.edit(embed=embed, view=None)
     except discord.NotFound:
         print(f"Message de l'événement {event_name} (ID: {event_doc_id}) non trouvé sur Discord. Il a peut-être été supprimé manuellement.")
     except Exception as e:
@@ -262,7 +262,6 @@ async def end_event_command(ctx, *event_name_parts):
         await ctx.send(f"L'événement **'{event_name}'** n'existe pas ou est déjà terminé.", ephemeral=True)
         return
 
-    # Il devrait n'y avoir qu'un seul événement avec ce nom
     event_doc_id = existing_event_docs[0].id
     
     await ctx.send(f"L'événement **'{event_name}'** est en cours de fermeture...", ephemeral=True)
@@ -289,9 +288,8 @@ async def list_events(ctx):
     embed = discord.Embed(
         title="[ LISTE DES EVENEMENTS EN COURS ]",
         description="```\nSTATUS : ACTIVATED\n```\nVoici la liste des evenements actifs sur le serveur :",
-        color=discord.Color.from_rgb(145, 70, 255) # Violet Twitch
+        color=discord.Color.from_rgb(145, 70, 255)
     )
-    # embed.set_thumbnail(url="https://i.imgur.com/8QzQy3I.png") # Exemple d'icône 8bit pour un visuel rétro
 
     for data in events_list:
         guild = bot.get_guild(data['guild_id'])
@@ -301,7 +299,7 @@ async def list_events(ctx):
         participants_count = len(data.get('participants', []))
         
         embed.add_field(
-            name=f"**{data['name']}**",
+            name=f"**[ COMMANDE : {data['name']} ]**",
             value=(
                 f"```\n"
                 f"[ROLE]       : {role.name if role else 'INTROUVABLE'}\n"
@@ -416,7 +414,7 @@ async def on_interaction(interaction: discord.Interaction):
     await bot.process_commands(interaction)
 
 
-@tasks.loop(minutes=1) # Vérifie les événements toutes les minutes
+@tasks.loop(minutes=1)
 async def check_expired_events():
     """
     Tâche en arrière-plan pour vérifier et terminer les événements expirés.
@@ -446,7 +444,7 @@ async def help_command(ctx, bot_name: str = None):
     embed = discord.Embed(
         title="[POXEL | ASSISTANT VIRTUALISE]",
         description="```\nSYSTEME EN LIGNE\n```\nJe suis Poxel, votre assistant pour gerer les evenements sur Discord. Voici les commandes :",
-        color=discord.Color.from_rgb(145, 70, 255) # Violet Twitch
+        color=discord.Color.from_rgb(145, 70, 255)
     )
 
     commands_info = {
@@ -484,5 +482,4 @@ async def help_command(ctx, bot_name: str = None):
 
 
 # --- Démarrage du Bot ---
-# Assure-toi que ton TOKEN est bien configuré avant de lancer le bot.
 bot.run(TOKEN)
