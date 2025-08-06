@@ -709,7 +709,12 @@ async def tirage_au_sort(ctx, *raffle_title_and_winners):
         await ctx.send("Veuillez spécifier un titre pour le concours et le nombre de gagnants. `!tirage_au_sort titre_du_concours nombre_de_gagnants`", ephemeral=True)
         return
 
-    num_winners = int(raffle_title_and_winners[-1])
+    try:
+        num_winners = int(raffle_title_and_winners[-1])
+    except ValueError:
+        await ctx.send("Le nombre de gagnants doit être un nombre valide.", ephemeral=True)
+        return
+
     raffle_title = " ".join(raffle_title_and_winners[:-1])
 
     if not raffle_title:
@@ -740,7 +745,7 @@ async def tirage_au_sort(ctx, *raffle_title_and_winners):
     
     embed = discord.Embed(
         title=f"NEW RAFFLE : {raffle_title}",
-        description=f"� A brand new raffle has been launched ! 🎉\n\n"
+        description=f"🎉 A brand new raffle has been launched ! 🎉\n\n"
                     f"To participate, click on the `PARTICIPER` button below.\n"
                     f"**Nombre de gagnants :** {num_winners}\n\n"
                     f"Bonne chance à tous !",
@@ -1154,4 +1159,3 @@ async def update_event_messages():
 
 # Exécute le bot
 bot.run(TOKEN)
-�
