@@ -166,22 +166,6 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
     if not event_name:
         await ctx.send("| ERREUR | NOM DE LA PARTIE MANQUANT", ephemeral=True)
         return
-
-    events_ref = db.collection('events')
-    existing_event_docs = events_ref.where('name', '==', event_name).get()
-    
-    if existing_event_docs:
-        existing_event_doc = existing_event_docs[0]
-        event_data = existing_event_doc.to_dict()
-        
-        # Vérifie si l'événement existant est expiré
-        if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
-            await ctx.send(f"| INFO | L'ancien événement '{event_name}' est expiré. Clôture automatique en cours pour en créer un nouveau...", ephemeral=True)
-            await _end_event(existing_event_doc.id)
-        else:
-            await ctx.send(f"| ERREUR | LA PARTIE '{event_name}' EXISTE DÉJÀ ET N'EST PAS TERMINÉE", ephemeral=True)
-            return
-
     if max_participants <= 0:
         await ctx.send("| ERREUR | CAPACITÉ DE PARTICIPANTS INVALIDE", ephemeral=True)
         return
@@ -191,58 +175,91 @@ async def create_event(ctx, role: discord.Role, duration_str: str, max_participa
     except ValueError as e:
         await ctx.send(f"| ERREUR | {str(e).upper()}", ephemeral=True)
         return
+    
+    # Utilisation d'une transaction pour garantir l'atomicité de la vérification et de la création
+    # Cela empêche la création d'événements en double en cas de concurrence.
+    @firestore.transactional
+    async def create_event_in_transaction(transaction, event_name, ctx, role, duration_seconds, max_participants, participant_label, waiting_room_channel, destination_voice_channel):
+        events_ref = db.collection('events')
+        event_query = events_ref.where('name', '==', event_name).stream()
+        existing_event_docs = [doc async for doc in event_query]
+        
+        # Vérifie si un événement avec le même nom existe déjà
+        if existing_event_docs:
+            existing_event_doc = existing_event_docs[0]
+            event_data = existing_event_doc.to_dict()
+            
+            # Si l'événement existant est expiré, on le termine pour en créer un nouveau
+            if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
+                await _end_event(existing_event_doc.id)
+                # La suite de la fonction va créer le nouvel événement
+            else:
+                # L'événement existe et n'est pas expiré, on lève une exception pour annuler la transaction
+                raise Exception(f"La partie '{event_name}' existe déjà et n'est pas terminée.")
 
-    end_time = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
-    temp_message = await ctx.send(">>> Chargement de la partie...")
+        # Si aucun événement existant n'est trouvé, on procède à la création
+        end_time = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+        temp_message = await ctx.send(">>> Chargement de la partie...")
 
-    event_data_firestore = {
-        'name': event_name,
-        'role_id': role.id,
-        'text_channel_id': ctx.channel.id, # Utilise le salon où la commande a été lancée
-        'waiting_room_channel_id': waiting_room_channel.id,
-        'destination_voice_channel_id': destination_voice_channel.id,
-        'end_time': end_time,
-        'max_participants': max_participants,
-        'participant_label': participant_label,
-        'participants': [],
-        'message_id': temp_message.id,
-        'guild_id': ctx.guild.id
-    }
-    doc_ref = db.collection('events').add(event_data_firestore)
-    event_firestore_id = doc_ref[1].id
+        event_data_firestore = {
+            'name': event_name,
+            'role_id': role.id,
+            'text_channel_id': ctx.channel.id,
+            'waiting_room_channel_id': waiting_room_channel.id,
+            'destination_voice_channel_id': destination_voice_channel.id,
+            'end_time': end_time,
+            'max_participants': max_participants,
+            'participant_label': participant_label,
+            'participants': [],
+            'message_id': temp_message.id,
+            'guild_id': ctx.guild.id
+        }
+        
+        # Création du document dans la transaction
+        new_event_ref = events_ref.document()
+        transaction.set(new_event_ref, event_data_firestore)
+        event_firestore_id = new_event_ref.id
 
-    view = discord.ui.View(timeout=None)
-    start_button = discord.ui.Button(
-        label="START", 
-        style=discord.ButtonStyle.primary,
-        custom_id=f"join_event_{event_firestore_id}",
-        emoji="🎮"
-    )
-    leave_button = discord.ui.Button(
-        label="EXIT", 
-        style=discord.ButtonStyle.danger,
-        custom_id=f"leave_event_{event_firestore_id}",
-        emoji="🚪"
-    )
+        view = discord.ui.View(timeout=None)
+        start_button = discord.ui.Button(
+            label="START", 
+            style=discord.ButtonStyle.primary,
+            custom_id=f"join_event_{event_firestore_id}",
+            emoji="🎮"
+        )
+        leave_button = discord.ui.Button(
+            label="EXIT", 
+            style=discord.ButtonStyle.danger,
+            custom_id=f"leave_event_{event_firestore_id}",
+            emoji="🚪"
+        )
 
-    view.add_item(start_button)
-    view.add_item(leave_button)
+        view.add_item(start_button)
+        view.add_item(leave_button)
 
-    embed = discord.Embed(
-        title=f"NOUVELLE PARTIE : {event_name.upper()}",
-        description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
-                    f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le **point de ralliement** et patienter d'être déplacé.",
-        color=discord.Color.from_rgb(255, 0, 154)
-    )
-    embed.add_field(name=f"**Participants ({max_participants})**", value="*Aucun participant inscrit pour le moment.*", inline=False)
-    embed.add_field(name="**Rôle attribué :**", value=f"{role.mention}", inline=True)
-    embed.add_field(name="**Point de ralliement :**", value=f"{waiting_room_channel.mention}", inline=True)
-    embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
-    embed.set_footer(text="| POXEL | Appuyez sur START pour participer.")
-    embed.timestamp = datetime.now()
+        embed = discord.Embed(
+            title=f"NOUVELLE PARTIE : {event_name.upper()}",
+            description=f"**Une nouvelle partie a été lancée ! Préparez-vous à jouer !**\n\n"
+                        f"Le rôle `{role.name}` vous sera attribué. Une fois inscrit, veuillez rejoindre le **point de ralliement** et patienter d'être déplacé.",
+            color=discord.Color.from_rgb(255, 0, 154)
+        )
+        embed.add_field(name=f"**Participants ({max_participants})**", value="*Aucun participant inscrit pour le moment.*", inline=False)
+        embed.add_field(name="**Rôle attribué :**", value=f"{role.mention}", inline=True)
+        embed.add_field(name="**Point de ralliement :**", value=f"{waiting_room_channel.mention}", inline=True)
+        embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
+        embed.set_footer(text="| POXEL | Appuyez sur START pour participer.")
+        embed.timestamp = datetime.now()
 
-    await temp_message.edit(content=None, embed=embed, view=view)
-    await ctx.send(f"| INFO | PARTIE '{event_name.upper()}' CRÉÉE", ephemeral=True)
+        await temp_message.edit(content=None, embed=embed, view=view)
+        await ctx.send(f"| INFO | PARTIE '{event_name.upper()}' CRÉÉE", ephemeral=True)
+        
+    try:
+        await create_event_in_transaction(db.transaction(), event_name, ctx, role, duration_seconds, max_participants, participant_label, waiting_room_channel, destination_voice_channel)
+    except Exception as e:
+        if str(e).startswith("La partie"):
+            await ctx.send(f"| ERREUR | {str(e).upper()}", ephemeral=True)
+        else:
+            await ctx.send(f"| ERREUR | UN PROBLÈME EST SURVENU LORS DE LA CRÉATION DE LA PARTIE : {e}", ephemeral=True)
 
 
 async def _end_event(event_doc_id: str):
