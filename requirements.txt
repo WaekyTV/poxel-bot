@@ -1,2 +1,4 @@
 discord.py
 firebase-admin
+Flask
+requests
