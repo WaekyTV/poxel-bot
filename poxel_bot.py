@@ -7,6 +7,10 @@ import os  # Pour accéder aux variables d'environnement (le TOKEN)
 import json # Pour parser le JSON des identifiants Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
+import threading # Ajouté pour le keep-alive
+from flask import Flask # Ajouté pour le keep-alive
+import requests # Ajouté pour le ping du keep-alive
+import time # Ajouté pour le délai du keep-alive
 
 # ==============================================================================
 # === INSTRUCTIONS IMPORTANTES POUR L'HÉBERGEMENT HORS REPLIT ===
@@ -18,6 +22,8 @@ from firebase_admin import credentials, firestore
 #    dans l'environnement de déploiement :
 #    - discord.py
 #    - firebase-admin
+#    - Flask
+#    - requests
 #    Un fichier `requirements.txt` est recommandé pour cela.
 #
 # 2. VARIABLES D'ENVIRONNEMENT : Le TOKEN Discord et les identifiants Firebase
@@ -624,10 +630,59 @@ async def help_command(ctx, bot_name: str = None):
 
 
 # ==============================================================================
-# === DÉMARRAGE DU BOT ===
-# Exécute le bot Discord directement avec son TOKEN.
-# Le reste de la logique (serveur web, threading) est géré par la plateforme
-# d'hébergement.
+# === DÉMARRAGE DU BOT ET SERVEUR KEEP-ALIVE ===
+# Exécute l'application Flask sur le thread principal et le bot Discord
+# ainsi que la tâche de ping sur des threads séparés.
 # ==============================================================================
+
+# Flask App pour le Keep-Alive
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    """Point d'accès simple pour vérifier que le serveur Flask est en ligne."""
+    return "Bot Discord POXEL est en ligne et opérationnel !"
+
+def run_bot_with_retries():
+    """Exécute le bot Discord sur son propre thread avec une logique de retry."""
+    retry_delay = 5 # Délai initial en secondes
+    max_retry_delay = 600 # Délai maximum (10 minutes)
+
+    while True:
+        try:
+            print(f"Tentative de connexion du bot Discord... (prochaine tentative dans {retry_delay}s si échec)")
+            bot.run(TOKEN)
+            # Si cette ligne est atteinte, cela signifie que bot.run() s'est terminé.
+            # Cela ne devrait arriver que si le bot se déconnecte ou s'arrête.
+            print("Le bot Discord s'est déconnecté ou l'exécution de bot.run() s'est terminée. Tentative de reconnexion...")
+            retry_delay = 5 # Réinitialise le délai après une déconnexion ou une fin d'exécution
+            time.sleep(retry_delay) # Attend avant de retenter la connexion
+        except discord.errors.HTTPException as e:
+            if e.status == 429: # Too Many Requests
+                print(f"ERREUR 429 (Too Many Requests) : Discord nous limite. Nouvelle tentative dans {retry_delay}s.")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay) # Augmente le délai de manière exponentielle
+            else:
+                print(f"ERREUR HTTP Discord inattendue ({e.status}) : {e}. Nouvelle tentative dans {retry_delay}s.")
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay)
+        except discord.LoginFailure:
+            print("ERREUR DE CONNEXION : Jeton Discord invalide. Veuillez vérifier votre DISCORD_TOKEN. Arrêt du bot.")
+            break # Arrête le thread si le jeton est invalide
+        except Exception as e:
+            print(f"ERREUR INATTENDUE LORS DE L'EXÉCUTION DU BOT : {e}.")
+            traceback.print_exc() # Affiche la trace complète de l'erreur
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_retry_delay)
+
+# La fonction ping_self est supprimée car UptimeRobot s'en chargera.
+
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    # Démarre le bot Discord sur un thread séparé.
+    discord_bot_thread = threading.Thread(target=run_bot_with_retries)
+    discord_bot_thread.daemon = True
+    discord_bot_thread.start()
+
+    # Exécute l'application Flask sur le thread principal.
+    # C'est cette exécution qui est détectée par Render pour maintenir le service actif.
+    app.run(host='0.0.0.0', port=8080)
