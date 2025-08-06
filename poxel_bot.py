@@ -120,33 +120,31 @@ async def _create_event_embed(event_data, guild, is_active: bool, is_expired: bo
         embed_title = "[ NOUVEL ÉVÉNEMENT ]"
         embed_color = discord.Color.from_rgb(255, 105, 180)
         footer_text = "[ GESTION PAR POXEL ]  |  LANCEMENT EN COURS |  WAEKY"
-        time_info = (f"░░ Durée de l'événement : {event_data.get('duration_str', 'Indéfinie')}\n"
-                     f"░░ Fin de l'événement : <t:{int(event_data['end_time'].timestamp())}:R>")
+        time_info = (f"Durée de l'événement : {event_data.get('duration_str', 'Indéfinie')}\n"
+                     f"Fin de l'événement : <t:{int(event_data['end_time'].timestamp())}:R>")
     else: # Événement planifié
         embed_title = "[ ÉVÉNEMENT PLANIFIÉ ]"
         embed_color = discord.Color.from_rgb(255, 200, 50)
         footer_text = "[ GESTION PAR POXEL ]  |  EN ATTENTE DE LANCEMENT |  WAEKY"
         days_until = get_days_until(event_data['scheduled_start_time'])
-        time_info = (f"░░ Durée de l'événement : {event_data.get('duration_str', 'Indéfinie')}\n"
-                     f"░░ Début de l'événement : dans {days_until}\n"
-                     f"░░ Début de l'événement : <t:{int(event_data['scheduled_start_time'].timestamp())}:F>")
+        time_info = (f"Durée de l'événement : {event_data.get('duration_str', 'Indéfinie')}\n"
+                     f"Début de l'événement : dans {days_until}\n"
+                     f"Début de l'événement : <t:{int(event_data['scheduled_start_time'].timestamp())}:F>")
 
     role = guild.get_role(event_data['role_id'])
     participant_list_str = get_participant_list_str(event_data.get('participants', []), guild, event_data.get('participant_label', 'Participant'))
 
     description = (
         f"```fix\n"
-        f"░░ Partie : {event_data['name']}\n"
-        f"░░ Rôle attribué : {role.name if role else 'NON SPÉCIFIÉ'}\n"
+        f"Partie : {event_data['name']}\n"
+        f"Rôle attribué : {role.name if role else 'NON SPÉCIFIÉ'}\n"
         f"{time_info}\n"
         f"```\n"
-        f"░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\n"
-        f"➤ Participants en ligne : {len(event_data.get('participants', []))} / {event_data['max_participants']}\n"
+        f"Participants en ligne : {len(event_data.get('participants', []))} / {event_data['max_participants']}\n"
         f"```fix\n"
         f"Participants :\n"
         f"{participant_list_str}\n"
         f"```\n"
-        f"░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░\n\n"
         f"Pour participer, cliquez sur le bouton S T A R T ci-dessous.\n"
         f"Une fois inscrit, rejoignez le point de ralliement {guild.get_channel(event_data['waiting_room_channel_id']).mention} pour le briefing de l'événement.\n"
     )
