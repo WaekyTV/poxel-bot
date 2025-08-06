@@ -104,11 +104,11 @@ async def _update_event_embed(guild, event_data, message_id):
             if member:
                 participants_mentions.append(member.mention)
         
-        participants_field_value = "\n".join(participants_mentions) if participants_mentions else "*Aucun participant inscrit pour le moment.*"
+        participants_field_value = "\n".join(participants_mentions) if participants_mentions else "*Aucun joueur inscrit pour le moment.*"
 
         embed.set_field_at(
             0,
-            name=f"**Participants ({len(participants_mentions)} / {event_data['max_participants']})**",
+            name=f"**Joueurs inscrits ({len(participants_mentions)} / {event_data['max_participants']})**",
             value=participants_field_value,
             inline=False
         )
@@ -120,7 +120,7 @@ async def _update_event_embed(guild, event_data, message_id):
     except Exception as e:
         print(f"Erreur lors de la mise à jour du message de la partie : {e}")
 
-async def _end_event(event_doc_id: str): # Suppression de bot_instance
+async def _end_event(event_doc_id: str):
     """
     Fonction interne pour terminer un événement, retirer les rôles et nettoyer.
     """
@@ -133,7 +133,7 @@ async def _end_event(event_doc_id: str): # Suppression de bot_instance
 
     event_data = event_doc.to_dict()
     event_name = event_data.get('name', 'Nom inconnu')
-    guild = bot.get_guild(event_data['guild_id']) # Utilisation de la variable globale bot
+    guild = bot.get_guild(event_data['guild_id'])
     
     if not guild:
         print(f"Guilde non trouvée pour la partie {event_name} (ID: {event_doc_id})")
@@ -172,7 +172,7 @@ async def _end_event(event_doc_id: str): # Suppression de bot_instance
             embed.title = f"PARTIE TERMINÉE : {event_name.upper()}"
             embed.description = f"**La partie est terminée. Bien joué !**"
             embed.clear_fields()
-            embed.add_field(name="**Participants finaux :**", value=f"{len(event_data.get('participants', []))} / {event_data['max_participants']} {event_data['participant_label']}", inline=False)
+            embed.add_field(name="**Joueurs finaux :**", value=f"{len(event_data.get('participants', []))} / {event_data['max_participants']} {event_data['participant_label']}", inline=False)
             await event_message.edit(embed=embed, view=None)
     except discord.NotFound:
         print(f"Message de la partie {event_name} (ID: {event_doc_id}) non trouvé sur Discord. Il a peut-être été supprimé manuellement.")
@@ -184,7 +184,7 @@ async def _end_event(event_doc_id: str): # Suppression de bot_instance
     print(f"Partie '{event_name}' (ID: {event_doc_id}) supprimée de Firestore.")
 
 @tasks.loop(minutes=1)
-async def check_expired_events(): # Suppression de bot_instance
+async def check_expired_events():
     """
     Tâche en arrière-plan pour vérifier et terminer les événements expirés.
     """
@@ -197,10 +197,10 @@ async def check_expired_events(): # Suppression de bot_instance
         
         if isinstance(event_end_time, datetime) and event_end_time.replace(tzinfo=timezone.utc) < now:
             print(f"Partie '{event_data.get('name', doc.id)}' expirée. Fin de la partie...")
-            await _end_event(doc.id) # Utilise la fonction _end_event sans bot_instance
-        await asyncio.sleep(60) # Exécution toutes les minutes
+            await _end_event(doc.id)
+        await asyncio.sleep(60)
 
-async def handle_event_participation(interaction: discord.Interaction, event_firestore_id: str, action: str): # Suppression de bot_instance
+async def handle_event_participation(interaction: discord.Interaction, event_firestore_id: str, action: str):
     """
     Gère les clics sur les boutons "START" et "EXIT".
     """
@@ -221,7 +221,7 @@ async def handle_event_participation(interaction: discord.Interaction, event_fir
     
     if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
         await interaction.followup.send("| ALERTE | LA DURÉE DE LA PARTIE EST EXPIRÉE. L'événement est clos.", ephemeral=True)
-        await _end_event(event_firestore_id) # Utilise la fonction _end_event sans bot_instance
+        await _end_event(event_firestore_id)
         return
 
     if not role:
@@ -295,16 +295,22 @@ async def create_event_command(ctx, role: discord.Role, text_channel: discord.Te
     @firestore.transactional
     async def _transaction_create_event(transaction):
         events_ref = db.collection('events')
-        event_query = events_ref.where('name', '==', event_name).stream()
-        existing_event_docs = [doc async for doc in event_query]
+        event_query = events_ref.where('name', '==', event_name)
         
-        if existing_event_docs:
-            existing_event_doc = existing_event_docs[0]
+        # Use transaction.get() to fetch the query snapshot within the transaction
+        existing_event_snapshot = await transaction.get(event_query)
+        
+        # Check if any documents exist in the snapshot
+        if existing_event_snapshot.documents:
+            existing_event_doc = existing_event_snapshot.documents[0]
             event_data = existing_event_doc.to_dict()
             
+            # Check if the existing event is expired
             if datetime.now(timezone.utc) > event_data['end_time'].replace(tzinfo=timezone.utc):
-                await _end_event(existing_event_doc.id) # Utilise la fonction _end_event sans bot_instance
+                # If expired, delete it within the transaction
+                transaction.delete(existing_event_doc.reference)
             else:
+                # The event exists and is not expired, raise an exception to cancel the transaction
                 raise Exception(f"La partie '{event_name}' existe déjà et n'est pas terminée.")
 
         end_time = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
@@ -358,7 +364,7 @@ async def create_event_command(ctx, role: discord.Role, text_channel: discord.Te
         embed.add_field(name="**Salon de jeu :**", value=f"{text_channel.mention}", inline=True)
         embed.add_field(name="**Durée :**", value=f"{duration_str} (Fin de partie <t:{int(end_time.timestamp())}:R>)", inline=False)
         embed.add_field(name="**Comment rejoindre ?**", value=f"1. Appuyez sur le bouton 'START'.\n2. Vous obtiendrez votre rôle et serez prêt à être déplacé vers le salon de jeu !", inline=False)
-        embed.set_footer(text="| P.O.X.E.L | Appuyez sur START pour participer.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
+        embed.set_footer(text="| Poxel | Appuyez sur START pour participer.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
         embed.timestamp = datetime.now()
 
         await temp_message.edit(content=None, embed=embed, view=view)
@@ -385,7 +391,7 @@ async def end_event_command_func(ctx, *event_name_parts):
     event_doc_id = existing_event_docs[0].id
     
     await ctx.send(f">>> Fin de la partie '{event_name.upper()}' en cours...", ephemeral=True)
-    await _end_event(event_doc_id) # Utilise la fonction _end_event sans bot_instance
+    await _end_event(event_doc_id)
     await ctx.send(f"| INFO | PARTIE '{event_name.upper()}' TERMINÉE MANUELLEMENT", ephemeral=True)
 
 async def move_participants_command(ctx, *event_name_parts):
@@ -442,8 +448,8 @@ async def list_events_command(ctx):
         return
 
     embed = discord.Embed(
-        title="| PARTIES ACTIVES |",
-        description="Voici la liste des parties en cours :",
+        title="🛰️ Missions en Cours 🪐",
+        description="```\n[RÉPERTOIRE DES ÉVÉNEMENTS ACTIFS]\n```",
         color=discord.Color.from_rgb(0, 158, 255)
     )
 
@@ -466,7 +472,7 @@ async def list_events_command(ctx):
             ),
             inline=False
         )
-    embed.set_footer(text="| P.O.X.E.L | Base de données des parties", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
+    embed.set_footer(text="| Poxel | Base de données des parties", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -475,7 +481,7 @@ async def intro_command_func(ctx):
     Affiche la présentation de Poxel et ses commandes.
     """
     embed = discord.Embed(
-        title="| P.O.X.E.L ASSISTANT |",
+        title="Présentation du Bot Poxel",
         description=(
             f"**Bonjour waeky !**\n"
             f"Je suis Poxel, votre assistant personnel pour l'organisation de parties de jeux.\n"
@@ -483,7 +489,7 @@ async def intro_command_func(ctx):
         ),
         color=discord.Color.from_rgb(145, 70, 255)
     )
-    embed.set_footer(text="Système en ligne.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
+    embed.set_footer(text="Système Poxel en ligne.", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
@@ -496,7 +502,7 @@ async def help_command_func(ctx, bot_name: str = None):
         return
 
     embed = discord.Embed(
-        title="| MANUEL DU JOUEUR |",
+        title="Manuel du Joueur Poxel",
         description="Voici la liste des commandes disponibles pour Poxel :",
         color=discord.Color.from_rgb(0, 158, 255)
     )
@@ -504,7 +510,7 @@ async def help_command_func(ctx, bot_name: str = None):
     commands_info = {
         "create_event": {
             "description": "Crée une nouvelle partie avec un rôle temporaire et deux salons vocaux.",
-            "usage": ("`!create_event @rôle #salon_textuel durée(ex: 2h) max_participants étiquette_participants #salon_attente #salon_de_jeu Nom de la partie`\n"
+            "usage": ("`!create_event @rôle #salon_textuel durée(ex: 2h) max_participants étiquette_participants #salon_attente_vocal #salon_de_jeu_vocal Nom de la partie`\n"
                       "Ex: `!create_event @Joueur #salon-jeu 1h30m 4 joueurs #salle-d-attente #salon-partie Partie de Donjons`")
         },
         "end_event": {
@@ -541,7 +547,7 @@ async def help_command_func(ctx, bot_name: str = None):
             inline=False
         )
     
-    embed.set_footer(text="| P.O.X.E.L | Bon jeu, waeky !", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
+    embed.set_footer(text="| Poxel | Bon jeu, waeky !", icon_url="https://images.emojiterra.com/google/noto-emoji/v2.034/512px/1f47d.png")
     embed.timestamp = datetime.now()
     await ctx.send(embed=embed)
 
