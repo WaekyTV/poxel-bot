@@ -87,6 +87,7 @@ def parse_duration(duration_str: str) -> int:
 NEON_BLUE = 0x009EFF
 NEON_RED = 0xFF073A
 NEON_GREEN = 0x39FF14
+PURPLE_START_COLOR = 0x6441a5 # Code hex pour la couleur demandée, noté pour référence mais non directement utilisable.
 
 def create_retro_embed(title, description="", color=NEON_BLUE):
     """Crée un embed avec un style simple."""
@@ -203,7 +204,7 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
             await self.update_event_message(interaction, updated_event_doc.to_dict())
 
     async def update_event_message(self, interaction: discord.Interaction, event_data: dict):
-        """Mise à jour de l'embed principal de l'événement."""
+        """Mise à jour de l'embed principal de l'événement et de ses boutons."""
         guild = interaction.guild
         participants = event_data.get('participants', [])
         max_participants = event_data.get('max_participants')
@@ -233,16 +234,18 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
                     )
                 
                 # Vérifier si les inscriptions sont complètes et envoyer un message
-                if max_participants and len(participants) == max_participants and not event_data.get('registrations_closed'):
+                is_full = max_participants and len(participants) >= max_participants
+                if is_full and not event_data.get('registrations_closed'):
                     channel_waiting = guild.get_channel(event_data.get('channel_waiting_id'))
                     if channel_waiting:
                         await channel_waiting.send(f"@everyone Les inscriptions pour l'événement **'{event_data.get('name', 'Nom inconnu')}'** sont complètes !")
                         await asyncio.to_thread(db.collection('events').document(self.event_firestore_id).update, {'registrations_closed': True})
-                
-                # Gérer l'état du bouton
-                view = EventButtons(self.event_firestore_id)
-                # Correction : La logique de désactivation du bouton doit aussi être dans la vue elle-même.
-                # L'état est géré par la logique du bouton dans la vue.
+                elif not is_full and event_data.get('registrations_closed'):
+                    # Si l'événement n'est plus plein mais était marqué comme fermé
+                    await asyncio.to_thread(db.collection('events').document(self.event_firestore_id).update, {'registrations_closed': False})
+
+                # Gérer l'état du bouton en fonction du nombre de participants
+                view = EventButtons(self.event_firestore_id, is_full=is_full)
                 await original_message.edit(embed=embed, view=view)
         except discord.NotFound:
             print(f"Erreur : Le message original de l'événement {event_data.get('name', 'nom inconnu')} n'a pas été trouvé. Il a peut-être été supprimé.")
@@ -251,20 +254,25 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
 
 
 class EventButtons(View):
-    def __init__(self, event_firestore_id):
+    def __init__(self, event_firestore_id: str, is_full: bool = False):
         super().__init__(timeout=None)
         self.event_firestore_id = event_firestore_id
         
-        # Ajout du bouton "START" (qui ouvre le modal d'inscription)
+        # Le bouton d'inscription change de style et de libellé si l'événement est complet
+        # Les boutons Discord ne peuvent pas avoir une couleur personnalisée via un code hexadécimal.
+        # Nous utilisons 'primary' (bleu) comme alternative pour le bouton 'START'.
+        join_button_style = discord.ButtonStyle.gray if is_full else discord.ButtonStyle.primary
+        join_button_label = "Inscriptions fermées" if is_full else "START"
+
         join_button = Button(
-            label="START", 
-            style=discord.ButtonStyle.green, 
-            custom_id=f"join_event_{self.event_firestore_id}"
+            label=join_button_label, 
+            style=join_button_style, 
+            custom_id=f"join_event_{self.event_firestore_id}",
+            disabled=False # Le bouton est toujours cliquable pour afficher le message d'erreur
         )
         join_button.callback = self.handle_join
         self.add_item(join_button)
 
-        # Ajout du bouton "QUIT"
         quit_button = Button(
             label="QUIT", 
             style=discord.ButtonStyle.red, 
@@ -289,7 +297,7 @@ class EventButtons(View):
         participants_list = event_data.get('participants', [])
         max_participants = event_data.get('max_participants')
         
-        # Vérifier si le bouton START est cliqué et que les inscriptions sont fermées.
+        # Si le bouton "START" est cliqué et que les inscriptions sont fermées.
         if interaction.custom_id.startswith("join_event_"):
             if event_data.get('registrations_closed') or (max_participants and len(participants_list) >= max_participants):
                 await interaction.response.send_message("Désolé, les inscriptions sont fermées.", ephemeral=True)
@@ -351,6 +359,9 @@ class EventButtons(View):
                         channel_waiting = guild.get_channel(channel_waiting_id)
                         if channel_waiting:
                             await channel_waiting.send(f"@everyone Une place s'est libérée pour l'événement **'{event_name}'** ! Inscriptions réouvertes !")
+            
+                # Mettre à jour l'embed après le désistement
+                await AliasModal(self.event_firestore_id).update_event_message(interaction, updated_data)
 
 
         except discord.Forbidden:
@@ -360,10 +371,6 @@ class EventButtons(View):
             await interaction.response.send_message(f"Une erreur est survenue lors de votre désinscription : `{e}`", ephemeral=True)
             return
         
-        # Mettre à jour l'embed après le désistement
-        updated_event_doc = await asyncio.to_thread(event_ref.get)
-        if updated_event_doc.exists:
-            await AliasModal(self.event_firestore_id).update_event_message(interaction, updated_event_doc.to_dict())
 
 
 # --- Tâche de gestion des événements ---
@@ -448,10 +455,10 @@ async def _end_event(event_doc_id: str, context_channel: Optional[discord.TextCh
     print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
 
 
-@tasks.loop(minutes=1)
+@tasks.loop(seconds=2) # Fréquence du loop ajustée à 2 secondes
 async def update_event_messages():
     """Tâche en arrière-plan pour vérifier et mettre à jour les événements."""
-    print("Mise à jour des événements en cours...")
+    # print("Mise à jour des événements en cours...")
     events_ref = db.collection('events')
     now = datetime.now(PARIS_TIMEZONE)
     
@@ -516,6 +523,7 @@ async def update_event_messages():
                 print(f"Erreur lors de la mise à jour du message de début d'événement : {e}")
 
         # Mise à jour du timer pour les événements en cours ou à venir
+        # Cette partie est essentielle pour rafraîchir l'horodatage
         try:
             message_id = event_data.get('message_id')
             guild = bot.get_guild(event_data.get('guild_id'))
@@ -535,7 +543,7 @@ async def update_event_messages():
                         timer_value = f"Début : <t:{start_time_timestamp}:f> (dans <t:{start_time_timestamp}:R>)"
                     else:
                         # Après le début de l'événement
-                        timer_value = f"Fin : <t:{end_time_timestamp}:f> (dans <t:{end_time_timestamp}:R>)"
+                        timer_value = f"Fin : <t:{end_time_timestamp}:f> (se termine <t:{end_time_timestamp}:R>)"
 
                     # Trouver le champ 'Début' ou 'Fin' et le mettre à jour
                     timer_field_found = False
@@ -547,7 +555,10 @@ async def update_event_messages():
                     if not timer_field_found:
                         embed.add_field(name="Début / Fin", value=timer_value, inline=False)
                     
-                    await event_message.edit(embed=embed)
+                    # Mise à jour des boutons si l'événement est plein
+                    is_full = event_data.get('max_participants') and len(event_data.get('participants', [])) >= event_data.get('max_participants')
+                    view = EventButtons(doc.id, is_full=is_full)
+                    await event_message.edit(embed=embed, view=view)
 
         except discord.NotFound:
             print(f"Message de l'événement {event_data.get('name', 'nom inconnu')} introuvable lors de la mise à jour du timer.")
@@ -556,226 +567,32 @@ async def update_event_messages():
             print(f"Erreur lors de la mise à jour du timer pour l'événement {event_data.get('name', 'nom inconnu')} : {e}")
 
 
-# --- Commandes du bot ---
-
-async def _create_event_handler(ctx, role: discord.Role, duration: str, start_time: str, channel_waiting: discord.TextChannel, channel_private: discord.TextChannel, max_participants: int, participant_label: str, event_name: str, start_date: str = None):
-    """Fonction interne pour gérer la création d'un événement."""
-    
-    # Supprimer le message de la commande
-    try:
-        await ctx.message.delete()
-    except discord.NotFound:
-        pass
-    except Exception as e:
-        print(f"Erreur lors de la suppression du message de commande : {e}")
-    
-    events_ref = db.collection('events')
-    existing_event = await asyncio.to_thread(events_ref.where(filter=firestore.FieldFilter('name', '==', event_name)).get)
-    if existing_event:
-        msg = await ctx.send(f"⚠️ Un événement nommé '{event_name}' existe déjà.", delete_after=60)
-        try:
-            await asyncio.sleep(60)
-            await msg.delete()
-        except discord.NotFound:
-            pass
-        return
-
-    try:
-        duration_seconds = parse_duration(duration)
-        if duration_seconds <= 0:
-            raise ValueError("La durée doit être positive.")
-        
-        now_paris = datetime.now(PARIS_TIMEZONE)
-        
-        if start_date:
-            # Correction de la gestion du fuseau horaire
-            start_datetime_naive = datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M")
-            start_datetime = PARIS_TIMEZONE.localize(start_datetime_naive)
-        else:
-            # Correction de la gestion du fuseau horaire
-            start_datetime_naive = datetime.strptime(start_time, "%Hh%M").replace(year=now_paris.year, month=now_paris.month, day=now_paris.day)
-            start_datetime = PARIS_TIMEZONE.localize(start_datetime_naive)
-            
-            if start_datetime < now_paris:
-                start_datetime += timedelta(days=1)
-        
-        end_datetime = start_datetime + timedelta(seconds=duration_seconds)
-
-    except (ValueError, IndexError, TypeError) as e:
-        msg = await ctx.send(f"❌ Erreur de format des arguments. {e}\nUtilisation correcte : `!helpoxel {ctx.command}`", delete_after=60)
-        try:
-            await asyncio.sleep(60)
-            await msg.delete()
-        except discord.NotFound:
-            pass
-        return
-
-    temp_message = await ctx.send("Création de l'événement en cours...")
-
-    event_data_firestore = {
-        'name': event_name,
-        'role_id': role.id,
-        'channel_waiting_id': channel_waiting.id,
-        'channel_private_id': channel_private.id,
-        'end_time': end_datetime,
-        'start_time': start_datetime,
-        'max_participants': max_participants,
-        'participant_label': participant_label,
-        'participants': [],
-        'message_id': temp_message.id,
-        'guild_id': ctx.guild.id,
-        'has_started': False,
-        'registrations_closed': False
-    }
-    doc_ref = db.collection('events').document()
-    await asyncio.to_thread(doc_ref.set, event_data_firestore)
-    event_firestore_id = doc_ref.id
-
-    view = EventButtons(event_firestore_id)
-    
-    embed = create_retro_embed(f"NOUVEL ÉVÉNEMENT : {event_name}")
-    embed.description = (
-        f"**Le rôle** {role.mention} **vous sera attribué une fois inscrit.** "
-        f"Veuillez rejoindre le **point de ralliement** et patienter d’être déplacé dans le **salon privé**."
-    )
-    
-    embed.add_field(name="Point de ralliement", value=channel_waiting.mention, inline=True)
-    embed.add_field(name="Salon privé", value=channel_private.mention, inline=True)
-    embed.add_field(name="Début / Fin", value=f"Début : <t:{int(start_datetime.timestamp())}:f> (dans <t:{int(start_datetime.timestamp())}:R>)", inline=False)
-    embed.add_field(name=f"Participants (0/{max_participants} {participant_label})", value="Aucun participant", inline=False)
-
-    await temp_message.edit(content=f"@everyone Un nouvel événement a été créé : **{event_name}** !", embed=embed, view=view)
-    
-    msg_confirm = await ctx.send(f"L'événement **'{event_name}'** a été créé avec succès.", delete_after=60)
-    try:
-        await asyncio.sleep(60)
-        await msg_confirm.delete()
-    except discord.NotFound:
-        pass
-
-
-@bot.command(name='create_event')
-@commands.has_permissions(manage_roles=True)
-async def create_event(ctx, role: discord.Role, duration: str, start_time: str, channel_waiting: discord.TextChannel, channel_private: discord.TextChannel, max_participants: int, participant_label: str, *, event_name: str):
-    """Crée un événement qui démarre à une heure précise (aujourd'hui ou demain)."""
-    await _create_event_handler(ctx, role=role, duration=duration, start_time=start_time, channel_waiting=channel_waiting, channel_private=channel_private, max_participants=max_participants, participant_label=participant_label, event_name=event_name)
-
-@bot.command(name='create_event_plan')
-@commands.has_permissions(manage_roles=True)
-async def create_event_plan(ctx, role: discord.Role, duration: str, start_date: str, start_time: str, channel_waiting: discord.TextChannel, channel_private: discord.TextChannel, max_participants: int, participant_label: str, *, event_name: str):
-    """Crée un événement planifié à une date et une heure précises."""
-    await _create_event_handler(ctx, role=role, duration=duration, start_date=start_date, start_time=start_time, channel_waiting=channel_waiting, channel_private=channel_private, max_participants=max_participants, participant_label=participant_label, event_name=event_name)
-
-@bot.command(name='end_event')
-@commands.has_permissions(manage_roles=True)
-async def end_event_command(ctx, *, event_name: str):
-    """Termine manuellement un événement et retire les rôles."""
-    try:
-        await ctx.message.delete()
-    except discord.NotFound:
-        pass
-    except Exception as e:
-        print(f"Erreur lors de la suppression du message de commande : {e}")
-
-    events_ref = db.collection('events')
-    existing_event_docs = await asyncio.to_thread(events_ref.where(filter=firestore.FieldFilter('name', '==', event_name)).get)
-
-    if not existing_event_docs:
-        msg = await ctx.send(f"L'événement **'{event_name}'** n'existe pas ou est déjà terminé.", delete_after=60)
-        try:
-            await asyncio.sleep(60)
-            await msg.delete()
-        except discord.NotFound:
-            pass
-        return
-
-    event_doc_id = existing_event_docs[0].id
-    
-    msg = await ctx.send(f"L'événement **'{event_name}'** est en cours de fermeture...", delete_after=60)
-    await _end_event(event_doc_id, context_channel=ctx.channel)
-    try:
-        await asyncio.sleep(60)
-        await msg.delete()
-    except discord.NotFound:
-        pass
-
-
-@bot.command(name='list_events')
-async def list_events(ctx):
-    """Affiche tous les événements actifs avec leurs détails."""
-    try:
-        await ctx.message.delete()
-    except discord.NotFound:
-        pass
-    except Exception as e:
-        print(f"Erreur lors de la suppression du message de commande : {e}")
-
-    events_ref = db.collection('events')
-    active_events_docs = await asyncio.to_thread(events_ref.stream)
-
-    events_list = []
-    for doc in active_events_docs:
-        events_list.append(doc.to_dict())
-
-    if not events_list:
-        msg = await ctx.send("Aucun événement actif pour le moment.", delete_after=60)
-        try:
-            await asyncio.sleep(60)
-            await msg.delete()
-        except discord.NotFound:
-            pass
-        return
-
-    embed = create_retro_embed("LISTE DES ÉVÉNEMENTS ACTIFS")
-
-    for data in events_list:
-        guild_id = data.get('guild_id')
-        guild = bot.get_guild(guild_id) if guild_id else None
-        
-        if not guild:
-            continue
-            
-        role = guild.get_role(data.get('role_id'))
-        channel_waiting = guild.get_channel(data.get('channel_waiting_id'))
-        channel_private = guild.get_channel(data.get('channel_private_id'))
-        
-        participants_data = data.get('participants', [])
-        participants_count = len(participants_data)
-        
-        participants_names = await get_participant_info(guild, participants_data)
-        
-        # Correction de l'affichage du timer avec le bon fuseau horaire
-        end_time_stamp = int(data['end_time'].timestamp()) if data.get('end_time') else 'N/A'
-        start_time_stamp = int(data['start_time'].timestamp()) if data.get('start_time') else 'N/A'
-        
-        
-        embed.add_field(
-            name=f"🎮 {data.get('name', 'Événement sans nom')}",
-            value=(
-                f"**Rôle :** {role.mention if role else 'Introuvable'}\n"
-                f"**Point de ralliement :** {channel_waiting.mention if channel_waiting else 'Introuvable'}\n"
-                f"**Salon privé :** {channel_private.mention if channel_private else 'Introuvable'}\n"
-                f"**Participants ({participants_count}/{data.get('max_participants', 'N/A')} {data.get('participant_label', 'participants')}) :**\n{participants_names}\n"
-                f"**Début :** <t:{start_time_stamp}:f> (se termine <t:{end_time_stamp}:R>)"
-            ),
-            inline=False
-        )
-
-    msg = await ctx.send(embed=embed, delete_after=300)
-    try:
-        await asyncio.sleep(300)
-        await msg.delete()
-    except discord.NotFound:
-        pass
-
-
 # --- Événements du Bot ---
 
+async def setup_views():
+    """
+    Fonction pour réactiver les vues persistantes au démarrage du bot.
+    """
+    print("Mise en place des vues persistantes pour les événements existants...")
+    events_ref = db.collection('events')
+    active_events_docs = await asyncio.to_thread(events_ref.stream)
+    
+    for doc in active_events_docs:
+        event_data = doc.to_dict()
+        event_firestore_id = doc.id
+        
+        # S'assurer que l'événement n'est ni commencé ni terminé
+        if not event_data.get('has_started'):
+            is_full = event_data.get('max_participants') and len(event_data.get('participants', [])) >= event_data.get('max_participants')
+            bot.add_view(EventButtons(event_firestore_id, is_full=is_full))
+            print(f"Vue persistante ajoutée pour l'événement {event_data.get('name')}")
+            
 @bot.event
 async def on_ready():
     """Se déclenche lorsque le bot est connecté à Discord."""
     print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
     print('Prêt à gérer les événements !')
+    await setup_views() # Appel de la fonction de mise en place des vues persistantes
     update_event_messages.start()
 
 @bot.event
@@ -881,6 +698,299 @@ async def help_command(ctx, *, command_name: str = None):
         await msg.delete()
     except discord.NotFound:
         pass
+
+
+@bot.command(name='create_event')
+@commands.has_permissions(manage_roles=True)
+async def create_event(
+    ctx, 
+    role: discord.Role,
+    duration: str,
+    channel_waiting: discord.TextChannel,
+    channel_priv: discord.TextChannel,
+    max_participants: int,
+    participant_label: str,
+    *,
+    event_name: str
+):
+    """
+    Crée un événement immédiat avec des paramètres spécifiques.
+    Utilisation: `!create_event @rôle durée(ex: 2h) #salon-attente #salon-privé max_participants label nom_de_l_événement`
+    """
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+
+    try:
+        duration_seconds = parse_duration(duration)
+        now = datetime.now(PARIS_TIMEZONE)
+        end_time = now + timedelta(seconds=duration_seconds)
+        
+        event_firestore_id = f"event_{ctx.guild.id}_{random.randint(1000, 9999)}_{now.timestamp()}"
+
+        event_data = {
+            'name': event_name,
+            'role_id': role.id,
+            'duration': duration,
+            'start_time': now,
+            'end_time': end_time,
+            'channel_waiting_id': channel_waiting.id,
+            'channel_priv_id': channel_priv.id,
+            'guild_id': ctx.guild.id,
+            'max_participants': max_participants,
+            'participant_label': participant_label,
+            'participants': [],
+            'registrations_closed': False,
+            'has_started': False,
+        )
+
+        # Création de l'embed
+        embed = create_retro_embed(f"NOUVEL ÉVÉNEMENT : {event_name}")
+        embed.description = f"Préparez-vous à une partie épique de {event_name} !"
+        embed.add_field(name="Rôle requis", value=role.mention, inline=False)
+        
+        # Ajout du timer
+        start_timestamp = int(now.timestamp())
+        end_timestamp = int(end_time.timestamp())
+        embed.add_field(name="Début / Fin", value=f"Début : <t:{start_timestamp}:f> (dans <t:{start_timestamp}:R>)\nFin : <t:{end_timestamp}:f> (se termine <t:{end_timestamp}:R>)", inline=False)
+        
+        embed.add_field(name="Salon d'attente", value=channel_waiting.mention, inline=True)
+        embed.add_field(name="Salon de jeu", value=channel_priv.mention, inline=True)
+        
+        embed.add_field(
+            name=f"Participants ({len(event_data['participants'])}/{max_participants} {participant_label})",
+            value="Aucun participant",
+            inline=False
+        )
+
+        is_full = max_participants and len(event_data['participants']) >= max_participants
+        view = EventButtons(event_firestore_id, is_full=is_full)
+        
+        # Envoi du message et mise à jour de l'ID du message dans Firestore
+        event_message = await channel_waiting.send(
+            content=f"**Un nouvel événement a été lancé ! Rejoignez-le en cliquant sur le bouton ci-dessous !**",
+            embed=embed,
+            view=view
+        )
+        
+        event_data['message_id'] = event_message.id
+        await asyncio.to_thread(db.collection('events').document(event_firestore_id).set, event_data)
+        
+    except ValueError as ve:
+        msg = await ctx.send(f"Erreur : {ve}", delete_after=60)
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+    except Exception as e:
+        msg = await ctx.send(f"Une erreur est survenue lors de la création de l'événement : `{e}`", delete_after=60)
+        print(f"Erreur de création d'événement : {e}")
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+
+
+@bot.command(name='create_event_plan')
+@commands.has_permissions(manage_roles=True)
+async def create_event_plan(
+    ctx, 
+    role: discord.Role,
+    duration: str,
+    date: str,
+    heure: str,
+    channel_waiting: discord.TextChannel,
+    channel_priv: discord.TextChannel,
+    max_participants: int,
+    participant_label: str,
+    *,
+    event_name: str
+):
+    """
+    Crée un événement planifié.
+    Utilisation: `!create_event_plan @rôle durée(ex: 2h) DD/MM/YYYY HH:MM #salon-attente #salon-privé max_participants label nom_de_l_événement`
+    """
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+
+    try:
+        duration_seconds = parse_duration(duration)
+        # Combinaison de la date et de l'heure et conversion en objet datetime
+        start_time_str = f"{date} {heure}"
+        start_time_utc = datetime.strptime(start_time_str, '%d/%m/%Y %Hh%M').astimezone(pytz.utc)
+        
+        # Mettre l'heure de début dans le fuseau horaire de Paris
+        start_time_paris = start_time_utc.astimezone(PARIS_TIMEZONE)
+        
+        end_time_paris = start_time_paris + timedelta(seconds=duration_seconds)
+        
+        now = datetime.now(PARIS_TIMEZONE)
+        
+        if start_time_paris < now:
+            await ctx.send("L'heure de début de l'événement est dans le passé. Veuillez fournir une heure future.", delete_after=60)
+            return
+
+        event_firestore_id = f"event_{ctx.guild.id}_{random.randint(1000, 9999)}_{now.timestamp()}"
+
+        event_data = {
+            'name': event_name,
+            'role_id': role.id,
+            'duration': duration,
+            'start_time': start_time_paris,
+            'end_time': end_time_paris,
+            'channel_waiting_id': channel_waiting.id,
+            'channel_priv_id': channel_priv.id,
+            'guild_id': ctx.guild.id,
+            'max_participants': max_participants,
+            'participant_label': participant_label,
+            'participants': [],
+            'registrations_closed': False,
+            'has_started': False,
+        }
+
+        # Création de l'embed
+        embed = create_retro_embed(f"ÉVÉNEMENT PLANIFIÉ : {event_name}")
+        embed.description = f"Préparez-vous à une partie épique de {event_name} !"
+        embed.add_field(name="Rôle requis", value=role.mention, inline=False)
+        
+        # Ajout du timer
+        start_timestamp = int(start_time_paris.timestamp())
+        end_timestamp = int(end_time_paris.timestamp())
+        embed.add_field(name="Début / Fin", value=f"Début : <t:{start_timestamp}:f> (dans <t:{start_timestamp}:R>)\nFin : <t:{end_timestamp}:f> (se termine <t:{end_timestamp}:R>)", inline=False)
+        
+        embed.add_field(name="Salon d'attente", value=channel_waiting.mention, inline=True)
+        embed.add_field(name="Salon de jeu", value=channel_priv.mention, inline=True)
+        
+        embed.add_field(
+            name=f"Participants ({len(event_data['participants'])}/{max_participants} {participant_label})",
+            value="Aucun participant",
+            inline=False
+        )
+        
+        is_full = max_participants and len(event_data['participants']) >= max_participants
+        view = EventButtons(event_firestore_id, is_full=is_full)
+        
+        # Envoi du message et mise à jour de l'ID du message dans Firestore
+        event_message = await channel_waiting.send(
+            content=f"**Un nouvel événement planifié a été lancé ! Rejoignez-le en cliquant sur le bouton ci-dessous !**",
+            embed=embed,
+            view=view
+        )
+        
+        event_data['message_id'] = event_message.id
+        await asyncio.to_thread(db.collection('events').document(event_firestore_id).set, event_data)
+        
+    except ValueError as ve:
+        msg = await ctx.send(f"Erreur : {ve}", delete_after=60)
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+    except Exception as e:
+        msg = await ctx.send(f"Une erreur est survenue lors de la création de l'événement : `{e}`", delete_after=60)
+        print(f"Erreur de création d'événement planifié : {e}")
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+
+@bot.command(name='end_event')
+@commands.has_permissions(manage_roles=True)
+async def end_event_command(ctx, *, event_name: str):
+    """
+    Termine manuellement un événement en cours.
+    Utilisation : `!end_event Nom de l'événement`
+    """
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+
+    events_ref = db.collection('events').where('name', '==', event_name)
+    event_docs = await asyncio.to_thread(events_ref.stream)
+    
+    event_doc_to_end = None
+    for doc in event_docs:
+        event_doc_to_end = doc
+        break
+        
+    if event_doc_to_end:
+        await ctx.send(f"Terminaison de l'événement **'{event_name}'** en cours...")
+        await _end_event(event_doc_to_end.id, ctx.channel)
+    else:
+        msg = await ctx.send(f"L'événement **'{event_name}'** n'a pas été trouvé.", delete_after=60)
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
+
+
+@bot.command(name='list_events')
+@commands.has_permissions(manage_roles=True)
+async def list_events_command(ctx):
+    """
+    Affiche tous les événements actifs avec leurs détails.
+    Utilisation: `!list_events`
+    """
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+    
+    events_ref = db.collection('events')
+    active_events_docs = await asyncio.to_thread(events_ref.stream)
+    
+    active_events = []
+    for doc in active_events_docs:
+        active_events.append(doc.to_dict())
+        
+    if not active_events:
+        msg = await ctx.send("Il n'y a pas d'événements en cours pour le moment.")
+        await asyncio.sleep(60)
+        await msg.delete()
+        return
+
+    embed = create_retro_embed("ÉVÉNEMENTS ACTIFS")
+
+    for event_data in active_events:
+        name = event_data.get('name', 'Nom inconnu')
+        start_time = event_data.get('start_time')
+        end_time = event_data.get('end_time')
+        
+        start_timestamp = int(start_time.timestamp())
+        end_timestamp = int(end_time.timestamp())
+        
+        participants_count = len(event_data.get('participants', []))
+        max_participants = event_data.get('max_participants', 'N/A')
+        participant_label = event_data.get('participant_label', 'participants')
+        
+        value = (
+            f"**Début :** <t:{start_timestamp}:f>\n"
+            f"**Fin :** <t:{end_timestamp}:f>\n"
+            f"**Participants :** {participants_count}/{max_participants} {participant_label}\n"
+            f"**Salon d'attente :** <#{event_data.get('channel_waiting_id')}>"
+        )
+        embed.add_field(name=f"**- {name}**", value=value, inline=False)
+        
+    msg = await ctx.send(embed=embed)
+    await asyncio.sleep(180)
+    await msg.delete()
 
 
 # --- Fonctions pour le serveur web ---
