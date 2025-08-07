@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 # Import des bibliothèques Firebase
 import firebase_admin
 from firebase_admin import credentials
-# Correction ici : on importe le client firestore depuis firebase_admin
 from firebase_admin import firestore
 
 # Charger les variables d'environnement depuis le fichier .env (pour les tests locaux)
@@ -34,7 +33,7 @@ try:
     # On initialise la connexion à Firebase en utilisant le contenu JSON de la variable d'environnement.
     cred = credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(cred)
-    db = firestore.client() # C'est maintenant la bonne méthode qui est appelée
+    db = firestore.client()
     print("Firebase Admin SDK initialisé avec succès.")
 except Exception as e:
     print(f"Erreur lors de l'initialisation de Firebase Admin SDK: {e}")
@@ -132,7 +131,8 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
         event_data = event_doc.to_dict()
         event_name = event_data.get('name', 'Nom inconnu')
         guild = interaction.guild
-        role = guild.get_role(event_data['role_id'])
+        role_id = event_data.get('role_id')
+        role = guild.get_role(role_id) if role_id else None
 
         if not role:
             await interaction.followup.send("Le rôle associé à cet événement n'a pas été trouvé.", ephemeral=True)
@@ -170,10 +170,12 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
             await interaction.followup.send(f"Vous avez rejoint l'événement **'{event_name}'** !", ephemeral=True)
             
             # Annoncer la nouvelle inscription
-            channel_waiting = guild.get_channel(event_data['channel_waiting_id'])
-            if channel_waiting:
-                pseudo_msg = f"({alias})" if alias else ""
-                await channel_waiting.send(f"Bienvenue dans la partie **{user.display_name}** {pseudo_msg} !")
+            channel_waiting_id = event_data.get('channel_waiting_id')
+            if channel_waiting_id:
+                channel_waiting = guild.get_channel(channel_waiting_id)
+                if channel_waiting:
+                    pseudo_msg = f"({alias})" if alias else ""
+                    await channel_waiting.send(f"Bienvenue dans la partie **{user.display_name}** {pseudo_msg} !")
             
         except discord.Forbidden:
             await interaction.followup.send("Je n'ai pas les permissions nécessaires pour vous donner ce rôle.", ephemeral=True)
@@ -219,7 +221,7 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
 
                 # Gérer l'état du bouton
                 view = EventButtons(self.event_firestore_id)
-                if len(participants) >= max_participants:
+                if max_participants and len(participants) >= max_participants:
                     view.children[0].label = "Inscriptions fermées"
                     view.children[0].style = discord.ButtonStyle.grey
                     view.children[0].disabled = True
@@ -269,7 +271,8 @@ class EventButtons(View):
         event_data = event_doc.to_dict()
         event_name = event_data.get('name', 'Nom inconnu')
         guild = interaction.guild
-        role = guild.get_role(event_data['role_id'])
+        role_id = event_data.get('role_id')
+        role = guild.get_role(role_id) if role_id else None
 
         participants_list = event_data.get('participants', [])
         
@@ -319,15 +322,18 @@ async def _end_event(event_doc_id: str):
 
     event_data = event_doc.to_dict()
     event_name = event_data.get('name', 'Nom inconnu')
-    guild = bot.get_guild(event_data['guild_id'])
+    guild_id = event_data.get('guild_id')
+    guild = bot.get_guild(guild_id) if guild_id else None
     
     if not guild:
-        print(f"Guilde non trouvée pour l'événement {event_name} (ID: {event_doc_id})")
+        print(f"Guilde non trouvée pour l'événement {event_name} (ID: {event_doc_id}). Suppression de l'événement.")
         await asyncio.to_thread(event_ref.delete)
         return
 
-    role = guild.get_role(event_data['role_id'])
-    channel_waiting = guild.get_channel(event_data['channel_waiting_id'])
+    role_id = event_data.get('role_id')
+    role = guild.get_role(role_id) if role_id else None
+    channel_waiting_id = event_data.get('channel_waiting_id')
+    channel_waiting = guild.get_channel(channel_waiting_id) if channel_waiting_id else None
     
     participants_list = event_data.get('participants', [])
 
@@ -344,18 +350,20 @@ async def _end_event(event_doc_id: str):
     
     # Mettre à jour le message de l'événement
     try:
-        event_message = await channel_waiting.fetch_message(event_data['message_id'])
-        if event_message:
-            embed = event_message.embeds[0]
-            embed.color = 0x8B0000  # Rouge foncé pour indiquer la fin
-            embed.description = f"**Événement terminé.**"
-            embed.clear_fields()
-            
-            participants_names = await get_participant_info(guild, participants_list)
-            
-            embed.add_field(name=f"Participants finaux ({len(participants_list)}/{event_data['max_participants']} {event_data['participant_label']})", value=participants_names, inline=False)
-            await event_message.edit(embed=embed, view=None) # view=None pour retirer les boutons
-            await channel_waiting.send(f"@everyone L'événement **'{event_name}'** est maintenant terminé.")
+        message_id = event_data.get('message_id')
+        if channel_waiting and message_id:
+            event_message = await channel_waiting.fetch_message(message_id)
+            if event_message:
+                embed = event_message.embeds[0]
+                embed.color = 0x8B0000  # Rouge foncé pour indiquer la fin
+                embed.description = f"**Événement terminé.**"
+                embed.clear_fields()
+                
+                participants_names = await get_participant_info(guild, participants_list)
+                
+                embed.add_field(name=f"Participants finaux ({len(participants_list)}/{event_data.get('max_participants', 'N/A')} {event_data.get('participant_label', 'participants')})", value=participants_names, inline=False)
+                await event_message.edit(embed=embed, view=None) # view=None pour retirer les boutons
+                await channel_waiting.send(f"@everyone L'événement **'{event_name}'** est maintenant terminé.")
     except discord.NotFound:
         print(f"Message de l'événement {event_name} non trouvé sur Discord.")
     except Exception as e:
@@ -525,10 +533,15 @@ async def list_events(ctx):
     embed = create_retro_embed("LISTE DES ÉVÉNEMENTS ACTIFS")
 
     for data in events_list:
-        guild = bot.get_guild(data['guild_id'])
-        role = guild.get_role(data['role_id']) if guild else None
-        channel_waiting = guild.get_channel(data['channel_waiting_id']) if guild else None
-        channel_private = guild.get_channel(data['channel_private_id']) if guild else None
+        guild_id = data.get('guild_id')
+        guild = bot.get_guild(guild_id) if guild_id else None
+        
+        if not guild:
+            continue
+            
+        role = guild.get_role(data.get('role_id'))
+        channel_waiting = guild.get_channel(data.get('channel_waiting_id'))
+        channel_private = guild.get_channel(data.get('channel_private_id'))
         
         participants_data = data.get('participants', [])
         participants_count = len(participants_data)
@@ -536,13 +549,13 @@ async def list_events(ctx):
         participants_names = await get_participant_info(guild, participants_data)
 
         embed.add_field(
-            name=f"🎮 {data['name']}",
+            name=f"🎮 {data.get('name', 'Événement sans nom')}",
             value=(
                 f"**Rôle :** {role.mention if role else 'Introuvable'}\n"
                 f"**Point de ralliement :** {channel_waiting.mention if channel_waiting else 'Introuvable'}\n"
                 f"**Salon privé :** {channel_private.mention if channel_private else 'Introuvable'}\n"
-                f"**Participants ({participants_count}/{data['max_participants']} {data['participant_label']}) :**\n{participants_names}\n"
-                f"**Fin :** <t:{int(data['end_time'].timestamp())}:R>"
+                f"**Participants ({participants_count}/{data.get('max_participants', 'N/A')} {data.get('participant_label', 'participants')}) :**\n{participants_names}\n"
+                f"**Fin :** <t:{int(data.get('end_time').timestamp())}:R>"
             ),
             inline=False
         )
