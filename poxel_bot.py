@@ -27,7 +27,6 @@ from flask import Flask # Pour créer le serveur web minimal
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
-from firebase_admin.exceptions import NotFound as FirebaseNotFound
 
 
 # Charger les variables d'environnement depuis le fichier .env (pour les tests locaux)
@@ -250,7 +249,7 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
                 if participants_field_index != -1:
                     embed.set_field_at(
                         index=participants_field_index,
-                        name=f"Participants ({len(participants)}/{max_participants} {participant_label})",
+                        name=f"Participants ({len(participants)}/{max_participants if max_participants else '∞'} {participant_label})",
                         value=participant_names,
                         inline=False
                     )
@@ -574,7 +573,7 @@ async def _end_event(event_doc_id: str, context_channel: discord.TextChannel):
     try:
         event_doc = await asyncio.to_thread(event_ref.get)
         event_data = event_doc.to_dict()
-    except FirebaseNotFound:
+    except firestore.NotFound:
         print(f"Erreur : L'événement {event_doc_id} n'a pas été trouvé pour la fin.")
         await context_channel.send(f"L'événement n'existe plus ou a déjà été terminé.", delete_after=60)
         return
