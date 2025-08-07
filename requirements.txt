@@ -3,3 +3,4 @@ pytz
 discord.py
 firebase-admin
 python-dotenv
+gunicorn
