@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 # --- INSTRUCTIONS POUR RENDER ---
-# IMPORTANT : Pour que ce bot fonctionne sur Render, vous devez configurer
-# le service comme un "Background Worker", et non un "Web Service".
-# Un bot Discord n'écoute pas sur un port HTTP, ce qui cause les erreurs
-# de timeout.
-# Assurez-vous également que la ligne 'pytz' est bien présente dans
-# votre fichier 'requirements.txt'.
+# IMPORTANT : Ce code a été modifié pour fonctionner en tant que "Web Service"
+# sur Render. Un serveur web minimal est démarré en parallèle du bot Discord
+# pour écouter sur un port et éviter l'erreur de "timeout".
+# Assurez-vous que les bibliothèques 'flask', 'pytz', 'discord.py' et 'firebase_admin'
+# sont bien dans votre fichier 'requirements.txt'.
 
 import discord
 from discord.ext import commands, tasks
@@ -19,6 +18,8 @@ import json
 from dotenv import load_dotenv
 import pytz # Import de la bibliothèque pour la gestion des fuseaux horaires
 from typing import Optional
+import threading # Pour démarrer le bot dans un thread séparé
+from flask import Flask # Pour créer le serveur web minimal
 
 # Import des bibliothèques Firebase
 import firebase_admin
@@ -33,15 +34,11 @@ BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 
 # --- Configuration Firebase ---
 try:
-    # On récupère le contenu de la clé Firebase depuis une variable d'environnement sur Render.
     firebase_json_key = os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY_JSON')
     if not firebase_json_key:
         raise ValueError("La variable d'environnement 'FIREBASE_SERVICE_ACCOUNT_KEY_JSON' n'est pas définie sur Render.")
-
-    # On convertit la chaîne JSON en dictionnaire Python pour l'utiliser comme une clé.
+    
     service_account_info = json.loads(firebase_json_key)
-
-    # On initialise la connexion à Firebase en utilisant le contenu JSON de la variable d'environnement.
     cred = credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(cred)
     db = firestore.client()
@@ -53,9 +50,9 @@ except Exception as e:
 
 # Définir le préfixe de commande et les intents nécessaires
 intents = discord.Intents.default()
-intents.message_content = True  # Nécessaire pour lire les commandes
+intents.message_content = True
 intents.guilds = True
-intents.members = True          # Nécessaire pour gérer les rôles des membres
+intents.members = True
 intents.reactions = True
 intents.presences = True
 
@@ -334,9 +331,6 @@ class EventButtons(View):
 async def _end_event(event_doc_id: str, context_channel: Optional[discord.TextChannel] = None):
     """
     Fonction interne pour terminer un événement, retirer les rôles et nettoyer.
-    Prend l'ID du document Firestore.
-    Le paramètre optionnel context_channel est utilisé pour envoyer un message de confirmation
-    si l'événement est terminé par une commande manuelle.
     """
     event_ref = db.collection('events').document(event_doc_id)
     event_doc = await asyncio.to_thread(event_ref.get)
@@ -399,7 +393,6 @@ async def _end_event(event_doc_id: str, context_channel: Optional[discord.TextCh
             print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
     else:
         # Si le message n'est pas trouvé, envoie un message de confirmation
-        # dans le canal de la commande (s'il y en a un).
         if context_channel:
             try:
                 await context_channel.send(f"L'événement **'{event_name}'** a été terminé, mais le message original a été supprimé. Les rôles ont été retirés aux participants.", delete_after=60)
@@ -479,7 +472,7 @@ async def update_event_messages():
                         timer_value = f"Début : <t:{start_time_timestamp}:f> (dans <t:{start_time_timestamp}:R>)"
                     else:
                         # Après le début de l'événement
-                        timer_value = f"Fin : <t:{end_time_timestamp}:f> (dans <t:{end_time_timestamp}:R>)"
+                        timer_value = f"Fin : <t:{end_time_stamp}:f> (dans <t:{end_time_stamp}:R>)"
 
                     # Trouver le champ 'Début' ou 'Fin' et le mettre à jour
                     for i, field in enumerate(embed.fields):
@@ -505,13 +498,11 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
     try:
         await ctx.message.delete()
     except discord.NotFound:
-        pass # Le message a déjà été supprimé
+        pass
     except Exception as e:
         print(f"Erreur lors de la suppression du message de commande : {e}")
     
-    # Vérifier si l'événement existe déjà dans Firestore
     events_ref = db.collection('events')
-    # Utilisation de l'argument 'filter' pour éviter le UserWarning
     existing_event = await asyncio.to_thread(events_ref.where(filter=firestore.FieldFilter('name', '==', event_name)).get)
     if existing_event:
         msg = await ctx.send(f"⚠️ Un événement nommé '{event_name}' existe déjà.", delete_after=60)
@@ -529,15 +520,11 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
         
         now_paris = datetime.now(PARIS_TIMEZONE)
         
-        # Gestion de l'heure et de la date de début
         if start_date:
-            # Créer un objet datetime non-naïf directement dans le fuseau horaire de Paris
             start_datetime = PARIS_TIMEZONE.localize(datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M"))
         else:
-            # Créer un objet datetime non-naïf pour aujourd'hui dans le fuseau horaire de Paris
             start_datetime = PARIS_TIMEZONE.localize(datetime.strptime(start_time, "%Hh%M")).replace(year=now_paris.year, month=now_paris.month, day=now_paris.day)
             
-            # Si l'heure de début est déjà passée aujourd'hui, la décaler au lendemain
             if start_datetime < now_paris:
                 start_datetime += timedelta(days=1)
         
@@ -552,10 +539,8 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
             pass
         return
 
-    # Créer un message temporaire pour obtenir l'ID du message
     temp_message = await ctx.send("Création de l'événement en cours...")
 
-    # Sauvegarder l'événement dans Firestore
     event_data_firestore = {
         'name': event_name,
         'role_id': role.id,
@@ -575,7 +560,6 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
     await asyncio.to_thread(doc_ref.set, event_data_firestore)
     event_firestore_id = doc_ref.id
 
-    # Création des boutons
     view = EventButtons(event_firestore_id)
     
     embed = create_retro_embed(f"NOUVEL ÉVÉNEMENT : {event_name}")
@@ -623,7 +607,6 @@ async def end_event_command(ctx, *, event_name: str):
         print(f"Erreur lors de la suppression du message de commande : {e}")
 
     events_ref = db.collection('events')
-    # Utilisation de l'argument 'filter' pour éviter le UserWarning
     existing_event_docs = await asyncio.to_thread(events_ref.where(filter=firestore.FieldFilter('name', '==', event_name)).get)
 
     if not existing_event_docs:
@@ -690,7 +673,6 @@ async def list_events(ctx):
         
         participants_names = await get_participant_info(guild, participants_data)
         
-        # S'assurer que les temps existent avant d'essayer de les formater
         end_time_stamp = int(data['end_time'].timestamp()) if data.get('end_time') else 'N/A'
         start_time_stamp = int(data['start_time'].timestamp()) if data.get('start_time') else 'N/A'
         
@@ -756,7 +738,7 @@ async def on_command_error(ctx, error):
         except discord.NotFound:
             pass
     elif isinstance(error, commands.CommandNotFound):
-        pass # Ignore les commandes non trouvées pour ne pas spammer le chat
+        pass
     else:
         print(f"Erreur de commande : {error}")
         msg = await ctx.send(f"Une erreur inattendue s'est produite : `{error}`", delete_after=60)
@@ -771,7 +753,6 @@ async def on_command_error(ctx, error):
 async def help_command(ctx, *, command_name: str = None):
     """Affiche le manuel d'aide de Poxel pour une commande spécifique."""
     
-    # Supprimer le message initial de l'utilisateur
     try:
         await ctx.message.delete()
     except discord.NotFound:
@@ -813,7 +794,6 @@ async def help_command(ctx, *, command_name: str = None):
     embed = create_retro_embed(f"MANUEL DE LA COMMANDE `!{command.name.upper()}`")
     embed.description = command.help
 
-    # Ajouter des exemples spécifiques
     if command.name == 'create_event':
         embed.add_field(name="Exemple", value="`!create_event @Joueur 1h30m 21h15 #salon-attente #salon-prive 10 joueurs Partie de Donjons`", inline=False)
     elif command.name == 'create_event_plan':
@@ -831,5 +811,26 @@ async def help_command(ctx, *, command_name: str = None):
         pass
 
 
-# --- Démarrage du Bot ---
-bot.run(BOT_TOKEN)
+# --- Fonctions pour le serveur web ---
+# (Ajoutées pour permettre au bot de fonctionner en tant que Web Service)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Poxel bot is running!"
+
+def run_flask_app():
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+def start_bot_in_thread():
+    bot.run(BOT_TOKEN)
+
+# --- Démarrage du Bot et du serveur web ---
+if __name__ == '__main__':
+    # Démarrer le bot dans un thread pour ne pas bloquer le serveur Flask
+    bot_thread = threading.Thread(target=start_bot_in_thread)
+    bot_thread.start()
+    
+    # Démarrer le serveur Flask dans le thread principal
+    run_flask_app()
