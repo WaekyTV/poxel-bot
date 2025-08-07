@@ -239,11 +239,8 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
                 
                 # Gérer l'état du bouton
                 view = EventButtons(self.event_firestore_id)
-                if max_participants and len(participants) >= max_participants:
-                    view.children[0].label = "Inscriptions fermées"
-                    view.children[0].style = discord.ButtonStyle.grey
-                    view.children[0].disabled = True
-                
+                # Correction : La logique de désactivation du bouton doit aussi être dans la vue elle-même.
+                # L'état est géré par la logique du bouton dans la vue.
                 await original_message.edit(embed=embed, view=view)
         except discord.NotFound:
             print(f"Erreur : Le message original de l'événement {event_data.get('name', 'nom inconnu')} n'a pas été trouvé. Il a peut-être été supprimé.")
@@ -273,6 +270,30 @@ class EventButtons(View):
         )
         quit_button.callback = self.handle_quit
         self.add_item(quit_button)
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """
+        Vérifie l'état du bouton d'inscription avant de l'autoriser.
+        Permet de désactiver le bouton de manière dynamique.
+        """
+        event_ref = db.collection('events').document(self.event_firestore_id)
+        event_doc = await asyncio.to_thread(event_ref.get)
+        
+        if not event_doc.exists:
+            await interaction.response.send_message("Cet événement n'existe plus ou a été terminé.", ephemeral=True)
+            return False
+            
+        event_data = event_doc.to_dict()
+        participants_list = event_data.get('participants', [])
+        max_participants = event_data.get('max_participants')
+        
+        # Vérifier si le bouton START est cliqué et que les inscriptions sont fermées.
+        if interaction.custom_id.startswith("join_event_"):
+            if event_data.get('registrations_closed') or (max_participants and len(participants_list) >= max_participants):
+                await interaction.response.send_message("Désolé, les inscriptions sont fermées.", ephemeral=True)
+                return False
+        
+        return True
 
     async def handle_join(self, interaction: discord.Interaction):
         """Ouvre le modal pour l'inscription."""
@@ -313,6 +334,23 @@ class EventButtons(View):
             
             await interaction.response.send_message(f"Vous avez quitté l'événement **'{event_name}'**.", ephemeral=True)
             
+            # --- Correction ajoutée : Gestion de la réouverture des inscriptions ---
+            updated_event_doc = await asyncio.to_thread(event_ref.get)
+            if updated_event_doc.exists:
+                updated_data = updated_event_doc.to_dict()
+                max_participants = updated_data.get('max_participants')
+                current_participants_count = len(updated_data.get('participants', []))
+                channel_waiting_id = updated_data.get('channel_waiting_id')
+
+                # Si l'événement était plein et qu'une place se libère
+                if updated_data.get('registrations_closed') and max_participants is not None and current_participants_count < max_participants:
+                    await asyncio.to_thread(event_ref.update, {'registrations_closed': False})
+                    if channel_waiting_id:
+                        channel_waiting = guild.get_channel(channel_waiting_id)
+                        if channel_waiting:
+                            await channel_waiting.send(f"@everyone Une place s'est libérée pour l'événement **'{event_name}'** ! Inscriptions réouvertes !")
+
+
         except discord.Forbidden:
             await interaction.response.send_message("Je n'ai pas les permissions nécessaires pour vous retirer ce rôle.", ephemeral=True)
             return
@@ -388,6 +426,7 @@ async def _end_event(event_doc_id: str, context_channel: Optional[discord.TextCh
             participants_names = await get_participant_info(guild, participants_list)
             
             embed.add_field(name=f"Participants finaux ({len(participants_list)}/{event_data.get('max_participants', 'N/A')} {event_data.get('participant_label', 'participants')})", value=participants_names, inline=False)
+            # Les boutons sont supprimés en passant view=None
             await event_message.edit(content=f"@everyone L'événement **'{event_name}'** est maintenant terminé.", embed=embed, view=None)
         except Exception as e:
             print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
@@ -446,7 +485,7 @@ async def update_event_messages():
                     embed.color = discord.Color.green()
                     embed.description = f"**L'événement a commencé !** Il se terminera <t:{int(event_end_time.timestamp())}:R>."
                     
-                    # Supprimer les boutons
+                    # Les boutons sont supprimés en passant view=None
                     await event_message.edit(embed=embed, view=None)
             except discord.NotFound:
                 print(f"Le message de l'événement {event_data.get('name')} n'a pas été trouvé pour la mise à jour de début.")
@@ -521,9 +560,13 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
         now_paris = datetime.now(PARIS_TIMEZONE)
         
         if start_date:
-            start_datetime = PARIS_TIMEZONE.localize(datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M"))
+            # Correction de la gestion du fuseau horaire
+            start_datetime_naive = datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M")
+            start_datetime = PARIS_TIMEZONE.localize(start_datetime_naive)
         else:
-            start_datetime = PARIS_TIMEZONE.localize(datetime.strptime(start_time, "%Hh%M")).replace(year=now_paris.year, month=now_paris.month, day=now_paris.day)
+            # Correction de la gestion du fuseau horaire
+            start_datetime_naive = datetime.strptime(start_time, "%Hh%M").replace(year=now_paris.year, month=now_paris.month, day=now_paris.day)
+            start_datetime = PARIS_TIMEZONE.localize(start_datetime_naive)
             
             if start_datetime < now_paris:
                 start_datetime += timedelta(days=1)
@@ -673,6 +716,7 @@ async def list_events(ctx):
         
         participants_names = await get_participant_info(guild, participants_data)
         
+        # Correction de l'affichage du timer avec le bon fuseau horaire
         end_time_stamp = int(data['end_time'].timestamp()) if data.get('end_time') else 'N/A'
         start_time_stamp = int(data['start_time'].timestamp()) if data.get('start_time') else 'N/A'
         
