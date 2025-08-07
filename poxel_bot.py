@@ -1,1080 +1,446 @@
+# coding=utf-8
 import discord
-from discord.ext import commands, tasks
-from datetime import datetime, timedelta, timezone
+from discord.ext import commands
 import asyncio
-import re
-import os
+from datetime import datetime, timedelta
 import json
-import random
+import os
 
-# Import des bibliothèques Firebase
-import firebase_admin
-from firebase_admin import credentials, firestore
-
-# --- Configuration du Bot ---
-# On récupère le TOKEN depuis les variables d'environnement de Replit
-TOKEN = os.environ['DISCORD_TOKEN']
-
-# --- Configuration Firebase ---
-# On utilise la variable d'environnement pour stocker les clés
-firebase_key_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY')
-firebase_key_filename = 'serviceAccountKey.json'
-
-if firebase_key_json:
-    try:
-        # Écrit le contenu de la variable d'environnement dans un fichier temporaire
-        with open(firebase_key_filename, 'w') as f:
-            f.write(firebase_key_json)
-        print("Fichier serviceAccountKey.json créé avec succès à partir de la variable d'environnement.")
-    except Exception as e:
-        print(f"Erreur lors de la création du fichier Firebase : {e}")
-        # Quitter si la clé ne peut pas être écrite
-        exit()
-else:
-    print("Variable d'environnement 'FIREBASE_SERVICE_ACCOUNT_KEY' non trouvée.")
-    exit()
-
-try:
-    cred = credentials.Certificate(firebase_key_filename)
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-    print("Firebase Admin SDK initialisé avec succès.")
-except Exception as e:
-    print(f"Erreur lors de l'initialisation de Firebase Admin SDK: {e}")
-    print("Assure-toi que 'serviceAccountKey.json' est présent et valide.")
-    exit()
-
-# Les "intents" sont les permissions que ton bot demande à Discord.
+# --- Configuration du bot ---
 intents = discord.Intents.default()
-intents.message_content = True
 intents.members = True
-intents.guilds = True
+intents.message_content = True
+intents.reactions = True
 
-# Initialisation du bot avec un préfixe de commande (ex: !create_event)
-# Désactiver l'aide par défaut de discord.py pour la remplacer par la nôtre
-bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- Fonctions Utilitaires ---
+# --- Variables globales pour le stockage en mémoire ---
+events_en_cours = {}
+messages_a_supprimer = []
+TOKEN = os.getenv('DISCORD_TOKEN') # Utilise une variable d'environnement pour le token
 
-def parse_duration(duration_str: str) -> int:
+# --- Fonctions utilitaires ---
+
+def creer_embed(titre, description, couleur=0x009EFF, champs=None, image_url=None):
     """
-    Parse une chaîne de durée (ex: "2h", "30m", "5s") en secondes.
-    Supporte les heures (h), minutes (m) et secondes (s).
+    Crée et retourne un embed avec un style rétro-futuriste.
     """
-    total_seconds = 0
-    matches = re.findall(r'(\d+)([hms])', duration_str.lower())
-
-    if not matches:
-        raise ValueError("Format de durée invalide. Utilisez '2h', '30m', '5s' ou une combinaison.")
-
-    for value, unit in matches:
-        value = int(value)
-        if unit == 'h':
-            total_seconds += value * 3600
-        elif unit == 'm':
-            total_seconds += value * 60
-        elif unit == 's':
-            total_seconds += value
-    return total_seconds
-
-def get_participant_list_str(participants: list, guild: discord.Guild, participant_label: str) -> str:
-    """
-    Génère une chaîne de caractères formatée avec les pseudos des participants.
-    """
-    if not participants:
-        return "Aucun participant pour le moment..."
-    
-    participant_list = []
-    for user_id in participants:
-        member = guild.get_member(user_id)
-        if member:
-            participant_list.append(f"• **{member.display_name}** ({participant_label})")
-    
-    return "\n".join(participant_list)
-
-def format_timedelta(delta: timedelta) -> str:
-    """
-    Formate un objet timedelta en une chaîne lisible (ex: "2h 30m 5s").
-    """
-    total_seconds = int(delta.total_seconds())
-    if total_seconds < 0:
-        return "Terminé"
-    
-    days = total_seconds // 86400
-    hours = (total_seconds % 86400) // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    
-    parts = []
-    if days > 0:
-        parts.append(f"{days} jour{'s' if days > 1 else ''}")
-    if hours > 0:
-        parts.append(f"{hours} heure{'s' if hours > 1 else ''}")
-    if minutes > 0:
-        parts.append(f"{minutes} minute{'s' if minutes > 1 else ''}")
-    if seconds >= 0 or not parts:
-        parts.append(f"{seconds} seconde{'s' if seconds > 1 else ''}")
-        
-    return " ".join(parts)
-
-async def _create_event_embed(event_data, guild, is_active: bool, is_expired: bool = False, is_cancelled: bool = False):
-    """
-    Crée un embed d'événement avec un visuel cohérent.
-    """
-    now = datetime.now(timezone.utc)
-    
-    if is_cancelled:
-        embed_title = "Événement annulé"
-        embed_color = discord.Color.from_rgb(255, 0, 0)
-        footer_text = "ÉVÉNEMENT ANNULÉ | WAEKY"
-        time_info = ""
-    elif is_expired:
-        embed_title = "Événement terminé"
-        embed_color = discord.Color.from_rgb(200, 0, 0)
-        footer_text = "ÉVÉNEMENT TERMINÉ | WAEKY"
-        time_info = "Cet événement est terminé."
-    elif is_active:
-        embed_title = "New event"
-        embed_color = discord.Color.from_rgb(255, 105, 180)
-        footer_text = "LANCEMENT EN COURS | WAEKY"
-        delta = event_data['end_time'] - now
-        time_info = (f"Durée de l'événement : {event_data.get('duration_str', 'Indéfinie')}\n"
-                     f"**Temps restant :** {format_timedelta(delta)}\n"
-                     f"Fin de l'événement : <t:{int(event_data['end_time'].timestamp())}:R>")
-    else: # Événement planifié
-        embed_title = "Événement planifié"
-        embed_color = discord.Color.from_rgb(255, 200, 50)
-        footer_text = "EN ATTENTE DU LANCEMENT | WAEKY"
-        delta = event_data['scheduled_start_time'] - now
-        time_info = (f"Durée de l'événement : {event_data.get('duration_str', 'Indéfinie')}\n"
-                     f"**Début de l'événement dans :** {format_timedelta(delta)}\n"
-                     f"Début de l'événement : <t:{int(event_data['scheduled_start_time'].timestamp())}:F>")
-
-    role = guild.get_role(event_data['role_id'])
-    participant_list_str = get_participant_list_str(event_data.get('participants', []), guild, event_data.get('participant_label', 'Participant'))
-    
-    registrations_open = (is_active or ('scheduled_start_time' in event_data and not is_expired and not is_cancelled))
-    
-    registration_status = ""
-    if is_cancelled:
-        registration_status = "Inscriptions fermées."
-    elif is_expired:
-        registration_status = "Inscriptions terminées."
-    elif len(event_data.get('participants', [])) >= event_data['max_participants']:
-        registration_status = "Capacité maximale atteinte ! Inscriptions fermées."
-    elif is_active:
-        registration_status = "Inscriptions ouvertes jusqu'à la fin de l'événement !"
-    else:
-        registration_status = "Inscriptions ouvertes jusqu'au lancement de l'événement !"
-    
-    description = (
-        f"**Nom de la partie :** {event_data['name']}\n"
-        f"**Rôle attribué :** {role.name if role else 'NON SPÉCIFIÉ'}\n"
-        f"**Statut de l'événement :** {embed_title}\n"
-        f"--------------------------------------------------\n"
-        f"{time_info}\n"
-        f"Participants inscrits : {len(event_data.get('participants', []))} / {event_data['max_participants']}\n"
-        f"**Statut des inscriptions :** {registration_status}\n\n"
-        f"**Participants :**\n"
-        f"--------------------------------------------------\n"
-        f"{participant_list_str}\n"
-        f"--------------------------------------------------\n"
-    )
-    
-    if registrations_open and not is_cancelled:
-        description += (
-            f"Pour participer, cliquez sur le bouton S T A R T ci-dessous.\n"
-            f"Une fois inscrit, rejoignez le point de ralliement {guild.get_channel(event_data['waiting_room_channel_id']).mention} pour le briefing de l'événement.\n"
-        )
-    
     embed = discord.Embed(
-        title=f"[ {embed_title} ]",
+        title=f"👾 💾 {titre} 💾 👾",
         description=description,
-        color=embed_color
+        color=couleur,
     )
-    embed.set_footer(text=footer_text)
-    embed.timestamp = now
+    embed.set_author(name="Poxel Bot 🤖", icon_url="https://i.imgur.com/2U5yV1t.png")
+    embed.set_footer(text="Système d'Event par Poxel - Version 1.0", icon_url="https://i.imgur.com/2U5yV1t.png")
+    if champs:
+        for nom, valeur, inline in champs:
+            embed.add_field(name=nom, value=valeur, inline=inline)
+    if image_url:
+        embed.set_image(url=image_url)
     return embed
 
-async def _update_event_message(guild: discord.Guild, event_firestore_id: str, is_active: bool, is_expired: bool = False, is_cancelled: bool = False):
+async def supprimer_messages_apres_delai():
     """
-    Met à jour le message d'événement avec les dernières informations.
-    Les boutons sont désactivés si l'événement est terminé, annulé ou plein.
+    Tâche en arrière-plan pour supprimer les messages de commandes.
     """
-    event_ref = db.collection('events').document(event_firestore_id)
-    event_doc = event_ref.get()
-    
-    if not event_doc.exists:
-        return
-
-    event_data = event_doc.to_dict()
-    
-    try:
-        channel = guild.get_channel(event_data['channel_id'])
-        if not channel: return
-        
-        event_message = await channel.fetch_message(event_data['message_id'])
-        if not event_message: return
-
-        # Crée une vue et désactive les boutons si l'événement est terminé, annulé ou plein
-        view = discord.ui.View(timeout=None)
-        
-        is_full = len(event_data.get('participants', [])) >= event_data['max_participants']
-        buttons_disabled = is_expired or is_cancelled or is_full
-
-        join_button = discord.ui.Button(
-            label="S T A R T", 
-            style=discord.ButtonStyle.blurple, 
-            custom_id=f"join_event_{event_firestore_id}",
-            disabled=buttons_disabled
-        )
-        leave_button = discord.ui.Button(
-            label="E X I T",
-            style=discord.ButtonStyle.red, 
-            custom_id=f"leave_event_{event_firestore_id}",
-            disabled=is_expired or is_cancelled
-        )
-        view.add_item(join_button)
-        view.add_item(leave_button)
-        
-        embed = await _create_event_embed(event_data, guild, is_active, is_expired, is_cancelled)
-        
-        await event_message.edit(embed=embed, view=view)
-    except Exception as e:
-        print(f"Erreur lors de la mise à jour du message de la partie : {e}")
-
-async def _delete_messages_after_delay(ctx, message: discord.Message, delay: int = 30):
-    """
-    Fonction utilitaire pour supprimer un message après un délai.
-    """
-    await asyncio.sleep(delay)
-    try:
-        if ctx and ctx.message:
-            await ctx.message.delete()
-        await message.delete()
-    except discord.Forbidden:
-        print("Permissions insuffisantes pour supprimer les messages.")
-    except discord.NotFound:
-        print("Message de commande ou de réponse non trouvé. Il a peut-être déjà été supprimé.")
-    except Exception as e:
-        print(f"Erreur lors de la suppression des messages : {e}")
-
-async def _cancel_event(event_doc_id: str, reason: str = "Annulé manuellement"):
-    """
-    Fonction interne pour annuler un événement, retirer les rôles et nettoyer.
-    """
-    event_ref = db.collection('events').document(event_doc_id)
-    event_doc = event_ref.get()
-
-    if not event_doc.exists:
-        print(f"Tentative d'annuler un événement non existant dans Firestore : {event_doc_id}")
-        return
-
-    event_data = event_doc.to_dict()
-    event_name = event_data.get('name', 'Nom inconnu')
-    guild = bot.get_guild(event_data['guild_id'])
-    
-    if not guild:
-        print(f"Guilde non trouvée pour l'événement {event_name} (ID: {event_doc_id})")
-        event_ref.delete()
-        return
-
-    role = guild.get_role(event_data['role_id'])
-    channel = guild.get_channel(event_data['channel_id'])
-    participants_list = list(event_data.get('participants', []))
-
-    for user_id in participants_list:
-        member = guild.get_member(user_id)
-        if member and role:
+    while True:
+        await asyncio.sleep(60)
+        messages_a_supprimer_copie = messages_a_supprimer[:]
+        for message in messages_a_supprimer_copie:
             try:
-                await member.remove_roles(role, reason=f"Annulation de la partie {event_name}")
-                print(f"Rôle {role.name} retiré à {member.display_name} pour la partie {event_name}")
-            except discord.Forbidden:
-                print(f"Permissions insuffisantes pour retirer le rôle {role.name} à {member.display_name}")
-            except Exception as e:
-                print(f"Erreur lors du retrait du rôle à {member.display_name}: {e}")
+                await message.delete()
+            except discord.NotFound:
+                pass
+            finally:
+                if message in messages_a_supprimer:
+                    messages_a_supprimer.remove(message)
 
-    # Notifie l'annulation
-    if channel:
-        try:
-            await channel.send(f"@everyone ❌ L'événement **'{event_name}'** a été annulé : {reason}. Merci de votre compréhension.")
-        except discord.Forbidden:
-            print(f"Permissions insuffisantes pour envoyer un message dans le salon {channel.name}")
+# --- Vues et composants d'interface utilisateur (boutons) ---
+
+class CreateEventView(discord.ui.View):
+    """
+    Vue contenant les boutons pour rejoindre et quitter un événement.
+    """
+    def __init__(self, bot, event_name, role_id, channel_id, participant_nom, embed_message_id, event_duree):
+        super().__init__(timeout=event_duree * 60)
+        self.bot = bot
+        self.event_name = event_name
+        self.role_id = role_id
+        self.channel_id = channel_id
+        self.participant_nom = participant_nom
+        self.embed_message_id = embed_message_id
+
+    async def on_timeout(self):
+        """
+        Fonction appelée lorsque la vue expire.
+        """
+        self.stop()
+        # Le reste de la logique de fin d'événement est géré par la fonction `finir_event`.
+
+    @discord.ui.button(label="Rejoindre 🎮", style=discord.ButtonStyle.green, custom_id="join_button")
+    async def join_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        Gère le clic sur le bouton "Rejoindre".
+        """
+        event = events_en_cours.get(self.event_name)
+        if not event:
+            await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True, delete_after=30)
+            return
+
+        if interaction.user.id in event['participants']:
+            await interaction.response.send_message("Tu es déjà inscrit à cet événement !", ephemeral=True, delete_after=30)
+            return
+
+        modal = discord.ui.Modal(title=f"Pseudo pour l'événement '{self.event_name}'")
+        modal.add_item(discord.ui.InputText(label="Pseudo en jeu (facultatif)", style=discord.InputTextStyle.short))
+        
+        async def on_submit_modal(interaction_modal: discord.Interaction):
+            pseudo = interaction_modal.data.get('components', [{}])[0].get('components', [{}])[0].get('value', '').strip()
+            
+            role = interaction.guild.get_role(self.role_id)
+            if role:
+                await interaction_modal.user.add_roles(role)
+            
+            event['participants'][interaction_modal.user.id] = {
+                'discord_id': interaction_modal.user.id,
+                'discord_pseudo': interaction_modal.user.name,
+                'pseudo_jeu': pseudo if pseudo else None,
+            }
+            
+            embed_message = await interaction_modal.channel.fetch_message(self.embed_message_id)
+            await mettre_a_jour_embed_event(embed_message, self.event_name)
+            
+            welcome_message = f"Bienvenue dans la partie {interaction_modal.user.mention}"
+            if pseudo:
+                welcome_message += f" ({pseudo})"
+            await interaction_modal.response.send_message(welcome_message, ephemeral=True, delete_after=30)
+
+        modal.on_submit = on_submit_modal
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Quitter 🚪", style=discord.ButtonStyle.red, custom_id="quit_button")
+    async def quit_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """
+        Gère le clic sur le bouton "Quitter".
+        """
+        event = events_en_cours.get(self.event_name)
+        if not event:
+            await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True, delete_after=30)
+            return
+
+        if interaction.user.id not in event['participants']:
+            await interaction.response.send_message("Tu n'es pas inscrit à cet événement.", ephemeral=True, delete_after=30)
+            return
+
+        role = interaction.guild.get_role(self.role_id)
+        if role:
+            await interaction.user.remove_roles(role)
+        
+        del event['participants'][interaction.user.id]
+        
+        embed_message = await interaction.channel.fetch_message(self.embed_message_id)
+        await mettre_a_jour_embed_event(embed_message, self.event_name)
+
+        await interaction.response.send_message(f"{interaction.user.mention} a quitté l'événement '{self.event_name}'.", ephemeral=True, delete_after=30)
+
+
+async def mettre_a_jour_embed_event(message, event_name):
+    """
+    Met à jour l'embed de l'événement avec la liste des participants en temps réel.
+    """
+    event = events_en_cours.get(event_name)
+    if not event:
+        return
+
+    participants_str = ""
+    for participant_info in event['participants'].values():
+        pseudo_jeu = participant_info['pseudo_jeu'] if participant_info['pseudo_jeu'] else "N/A"
+        participants_str += f"> `👾` {participant_info['discord_pseudo']} (pseudo: {pseudo_jeu})\n"
     
-    # Met à jour le message pour indiquer l'annulation
+    participants_str = participants_str if participants_str else "Aucun participant pour l'instant."
+
+    embed = creer_embed(
+        f"new event: {event_name}",
+        f"Durée: {event['duree']} minutes\n"
+        f"Point de ralliement: <#{event['salon_attente_id']}>\n"
+        f"Il y a actuellement `{len(event['participants'])}` {event['participant_nom']}(s) inscrit(s).\n\n"
+        f"Le rôle <@&{event['role_id']}> vous sera attribué une fois inscrit. Veuillez rejoindre le point de ralliement et patienter d’être déplacé dans le salon.",
+        champs=[
+            (f"Liste des {event['participant_nom']}(s)", participants_str, False)
+        ]
+    )
+
+    await message.edit(embed=embed)
+
+
+async def creer_event_maintenant(ctx, role_name, channel_name, duree, event_name, participant_nom):
+    """
+    Fonction principale pour créer un événement immédiat.
+    """
+    if event_name in events_en_cours:
+        await ctx.send(f"❌ L'événement '{event_name}' existe déjà.", delete_after=60)
+        return
+
     try:
-        event_message = await channel.fetch_message(event_data['message_id'])
-        if event_message:
-            embed = await _create_event_embed(event_data, guild, is_active=False, is_cancelled=True)
-            await event_message.edit(embed=embed, view=None)
-    except discord.NotFound:
-        print(f"Message de la partie {event_name} non trouvé sur Discord.")
-    except Exception as e:
-        print(f"Erreur lors de la mise à jour du message d'annulation : {e}")
+        role = await ctx.guild.create_role(name=role_name, color=0x009EFF)
+        salon = await ctx.guild.create_text_channel(
+            channel_name, 
+            overwrites={
+                ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                role: discord.PermissionOverwrite(read_messages=True),
+                ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+        )
+    except discord.Forbidden:
+        await ctx.send("❌ Je n'ai pas les permissions nécessaires pour créer des rôles/salons.", delete_after=60)
+        return
 
-    # Supprime l'événement de Firestore
-    event_ref.delete()
-    print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
+    embed_message = await ctx.send("@everyone")
+    view = CreateEventView(bot, event_name, role.id, salon.id, participant_nom, embed_message.id, duree)
+    
+    events_en_cours[event_name] = {
+        'type': 'immédiat',
+        'nom': event_name,
+        'role_id': role.id,
+        'salon_attente_id': salon.id,
+        'duree': duree,
+        'participant_nom': participant_nom,
+        'participants': {},
+        'embed_message_id': embed_message.id
+    }
+    
+    await mettre_a_jour_embed_event(embed_message, event_name)
+    await embed_message.edit(view=view)
+
+    bot.loop.create_task(finir_event_apres_delai(event_name, duree * 60))
+
+    await ctx.send(f"✅ L'événement '{event_name}' a été créé ! Il commencera dans {duree} minutes.")
 
 
-# --- Événements du Bot ---
+async def finir_event(event_name, guild):
+    """
+    Fonction pour gérer la fin d'un événement.
+    """
+    if event_name not in events_en_cours:
+        return
+    
+    event = events_en_cours[event_name]
+    embed_message_id = event.get('embed_message_id')
+    
+    try:
+        role = guild.get_role(event['role_id'])
+        salon = guild.get_channel(event['salon_attente_id'])
+
+        for participant_id in event['participants']:
+            member = guild.get_member(participant_id)
+            if member and role:
+                await member.remove_roles(role)
+
+        if salon:
+            await salon.delete()
+        if role:
+            await role.delete()
+
+        if guild.system_channel:
+            await guild.system_channel.send(f"@everyone 🕰️ L'événement '{event_name}' est maintenant terminé !")
+
+        if embed_message_id:
+            try:
+                message = await guild.system_channel.fetch_message(embed_message_id)
+                await message.delete()
+            except (discord.NotFound, discord.HTTPException):
+                pass
+    
+    except discord.Forbidden:
+        if guild.system_channel:
+            await guild.system_channel.send("❌ Je n'ai pas les permissions pour nettoyer les rôles et salons.")
+
+    del events_en_cours[event_name]
+    
+
+async def finir_event_apres_delai(event_name, delai_secondes):
+    """
+    Attend un certain temps puis appelle la fonction de fin d'événement.
+    """
+    await asyncio.sleep(delai_secondes)
+    guild = bot.guilds[0]
+    await finir_event(event_name, guild)
+
+
+# --- Commandes du bot ---
+
+def has_manage_roles():
+    """
+    Décorateur de vérification de permissions.
+    """
+    async def predicate(ctx):
+        return ctx.author.guild_permissions.manage_roles
+    return commands.check(predicate)
+
 
 @bot.event
 async def on_ready():
     """
-    Se déclenche lorsque le bot est connecté à Discord.
+    Indique que le bot est prêt et démarre la tâche de suppression de messages.
     """
     print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
-    print('Prêt à gérer les événements, les concours et les annulations !')
-    check_expired_events.start()
-    check_scheduled_events.start()
-    update_event_messages.start()
+    bot.loop.create_task(supprimer_messages_apres_delai())
 
-@bot.event
-async def on_command_error(ctx, error):
+
+@bot.command(name='create_event')
+@has_manage_roles()
+async def create_event(ctx, event_name, participant_nom, role_name, channel_name, duree: int):
     """
-    Gère les erreurs de commande et supprime les messages d'erreur et de commande après un délai.
+    Crée un événement immédiat.
+    Exemple: !create_event "Chasse au dragon" joueur "Chasseurs" "salle-des-chasseurs" 60
     """
-    if isinstance(error, commands.MissingRequiredArgument):
-        response_msg = await ctx.send(f"Erreur de syntaxe : Il manque un argument pour cette commande. Utilisation correcte : `{ctx.command.usage}`", ephemeral=True)
-    elif isinstance(error, commands.BadArgument):
-        response_msg = await ctx.send(f"Erreur d'argument : Argument invalide. Veuillez vérifier le format de vos arguments.", ephemeral=True)
-    elif isinstance(error, commands.MissingPermissions):
-        response_msg = await ctx.send("Accès refusé : Vous n'avez pas les permissions nécessaires pour exécuter cette commande (Gérer les rôles).", ephemeral=True)
-    elif isinstance(error, commands.CommandNotFound):
-        return
-    else:
-        print(f"Erreur de commande : {error}")
-        response_msg = await ctx.send(f"Erreur du système : Une erreur inattendue s'est produite.", ephemeral=True)
+    await ctx.message.delete(delay=60)
+    await creer_event_maintenant(ctx, role_name, channel_name, duree, event_name, participant_nom)
+
+
+@bot.command(name='create_event_plan')
+@has_manage_roles()
+async def create_event_plan(ctx, event_name, participant_nom, role_name, channel_name, duree: int, date_str, heure_str):
+    """
+    Planifie un événement à une date et heure précises.
+    Exemple: !create_event_plan "Tournoi de foot" footballeur "Footballeurs" "stade-de-foot" 120 2025-08-08 20:00
+    """
+    await ctx.message.delete(delay=60)
+    
+    try:
+        date_planifiee = datetime.strptime(f"{date_str} {heure_str}", "%Y-%m-%d %H:%M")
+        maintenant = datetime.now()
+        delai_secondes = (date_planifiee - maintenant).total_seconds()
         
-    await _delete_messages_after_delay(ctx, response_msg, delay=30)
+        if delai_secondes < 0:
+            await ctx.send("❌ La date et l'heure de planification sont dans le passé.", delete_after=60)
+            return
 
+        await ctx.send(f"✅ L'événement '{event_name}' est planifié pour le {date_planifiee.strftime('%d/%m/%Y à %H:%M')}.", delete_after=60)
 
-# --- Commandes du Bot ---
-
-@bot.command(name='create_event', usage='<@rôle> <#salon> <#salon_d_attente> <durée (ex: 2h, 30m)> <max_participants> <min_participants> <étiquette_participants> <Nom de l\'événement>')
-@commands.has_permissions(manage_roles=True)
-async def create_event(ctx, role: discord.Role, channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, duration_str: str, max_participants: int, min_participants: int, participant_label: str, *event_name_parts):
-    """
-    Crée un nouvel événement immédiat.
-    Ex: !create_event @RoleGaming #salon-prive-gaming #attente 2h 10 3 joueurs Soirée Gaming Communauté
-    """
-    event_name = " ".join(event_name_parts)
-    if not event_name:
-        await ctx.send("Veuillez spécifier un nom pour l'événement.", ephemeral=True)
-        return
-
-    events_ref = db.collection('events')
-    existing_event_docs = events_ref.where('name', '==', event_name).get()
-    if existing_event_docs:
-        await ctx.send(f"Un événement nommé '{event_name}' existe déjà. Terminez l'ancien pour en créer un nouveau.", ephemeral=True)
-        return
-
-    if max_participants <= 0 or min_participants <= 0 or min_participants > max_participants:
-        await ctx.send("Le nombre de participants doit être supérieur à zéro, et le minimum doit être inférieur ou égal au maximum.", ephemeral=True)
-        return
-
-    try:
-        duration_seconds = parse_duration(duration_str)
-    except ValueError as e:
-        await ctx.send(str(e), ephemeral=True)
-        return
+        await asyncio.sleep(delai_secondes)
+        
+        await creer_event_maintenant(ctx, role_name, channel_name, duree, event_name, participant_nom)
     
-    end_time = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
-
-    temp_message = await ctx.send("Création de l'événement en cours...")
-
-    event_data_firestore = {
-        'name': event_name,
-        'role_id': role.id,
-        'channel_id': channel.id,
-        'waiting_room_channel_id': waiting_room_channel.id,
-        'end_time': end_time,
-        'duration_str': duration_str,
-        'max_participants': max_participants,
-        'min_participants': min_participants,
-        'participant_label': participant_label,
-        'participants': [],
-        'message_id': temp_message.id,
-        'guild_id': ctx.guild.id
-    }
-    doc_ref = db.collection('events').add(event_data_firestore)
-    event_firestore_id = doc_ref[1].id
-
-    view = discord.ui.View(timeout=None)
-    join_button = discord.ui.Button(
-        label="S T A R T", 
-        style=discord.ButtonStyle.blurple, 
-        custom_id=f"join_event_{event_firestore_id}"
-    )
-    leave_button = discord.ui.Button(
-        label="E X I T",
-        style=discord.ButtonStyle.red, 
-        custom_id=f"leave_event_{event_firestore_id}"
-    )
-    view.add_item(join_button)
-    view.add_item(leave_button)
-
-    # Mise à jour des permissions du rôle pour le salon
-    await channel.set_permissions(ctx.guild.default_role, read_messages=False)
-    await channel.set_permissions(role, read_messages=True, send_messages=True)
-    
-    embed = await _create_event_embed(event_data_firestore, ctx.guild, is_active=True)
-    
-    await temp_message.edit(content=None, embed=embed, view=view)
-    
-    # Envoi de la notification @everyone
-    await ctx.send(f"@everyone 📣 Un nouvel événement a été lancé : **{event_name}** ! Il durera **{duration_str}** et les inscriptions sont maintenant ouvertes !")
-
-    # Message de confirmation qui sera supprimé après un délai
-    confirmation_msg = await ctx.send(f"L'événement **'{event_name}'** a été lancé et se terminera dans {duration_str}.", ephemeral=True)
-    await _delete_messages_after_delay(ctx, confirmation_msg, delay=30)
+    except ValueError:
+        await ctx.send("❌ Format de date/heure incorrect. Utilisez YYYY-MM-DD HH:MM", delete_after=60)
 
 
-@bot.command(name='planifier_evenement', usage='<@rôle> <#salon> <#salon_d_attente> <durée (ex: 2h)> <date_début (YYYY-MM-DDTHH:mm)> <max_participants> <min_participants> <étiquette_participants> <Nom de l\'événement>')
-@commands.has_permissions(manage_roles=True)
-async def planifier_evenement(ctx, role: discord.Role, channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, duration_str: str, scheduled_time_str: str, max_participants: int, min_participants: int, participant_label: str, *event_name_parts):
+@bot.command(name='end_event')
+@has_manage_roles()
+async def end_event(ctx, event_name):
     """
-    Planifie un nouvel événement pour un lancement ultérieur.
-    Ex: !planifier_evenement @RoleGaming #prive #attente 2h 2024-08-01T20:00 10 3 joueurs Soirée Futur
+    Termine manuellement un événement immédiat.
+    Exemple: !end_event "Chasse au dragon"
     """
-    event_name = " ".join(event_name_parts)
-    if not event_name:
-        await ctx.send("Veuillez spécifier un nom pour l'événement.", ephemeral=True)
-        return
-
-    events_ref = db.collection('events')
-    existing_event_docs = events_ref.where('name', '==', event_name).get()
-    if existing_event_docs:
-        await ctx.send(f"Un événement nommé '{event_name}' existe déjà. Terminez l'ancien pour en créer un nouveau.", ephemeral=True)
-        return
-
-    if max_participants <= 0 or min_participants <= 0 or min_participants > max_participants:
-        await ctx.send("Le nombre de participants doit être supérieur à zéro, et le minimum doit être inférieur ou égal au maximum.", ephemeral=True)
-        return
-
-    try:
-        duration_seconds = parse_duration(duration_str)
-        scheduled_start_time_naive = datetime.strptime(scheduled_time_str, '%Y-%m-%dT%H:%M')
-        scheduled_start_time = scheduled_start_time_naive.replace(tzinfo=timezone.utc)
-    except ValueError as e:
-        await ctx.send(f"Erreur dans le format de la durée ou de l'heure. Détails: `{e}`. Utilisez le format 'YYYY-MM-DDTHH:mm'.", ephemeral=True)
-        return
-
-    if scheduled_start_time < datetime.now(timezone.utc):
-        await ctx.send("La date et l'heure de début doivent être dans le futur.", ephemeral=True)
-        return
-
-    temp_message = await ctx.send("Planification de l'événement en cours...")
-
-    event_data_firestore = {
-        'name': event_name,
-        'role_id': role.id,
-        'channel_id': channel.id,
-        'waiting_room_channel_id': waiting_room_channel.id,
-        'duration_str': duration_str,
-        'scheduled_start_time': scheduled_start_time,
-        'max_participants': max_participants,
-        'min_participants': min_participants,
-        'participant_label': participant_label,
-        'participants': [],
-        'message_id': temp_message.id,
-        'guild_id': ctx.guild.id
-    }
-    doc_ref = db.collection('events').add(event_data_firestore)
-    event_firestore_id = doc_ref[1].id
-
-    view = discord.ui.View(timeout=None)
-    join_button = discord.ui.Button(
-        label="S T A R T", 
-        style=discord.ButtonStyle.blurple, 
-        custom_id=f"join_event_{event_firestore_id}"
-    )
-    leave_button = discord.ui.Button(
-        label="E X I T",
-        style=discord.ButtonStyle.red, 
-        custom_id=f"leave_event_{event_firestore_id}"
-    )
-    view.add_item(join_button)
-    view.add_item(leave_button)
-
-    embed = await _create_event_embed(event_data_firestore, ctx.guild, is_active=False)
-
-    await temp_message.edit(content=None, embed=embed, view=view)
-    
-    # Envoi de la notification @everyone
-    await ctx.send(f"@everyone 📣 Un nouvel événement planifié a été créé : **{event_name}** ! "
-                   f"Il démarrera le <t:{int(scheduled_start_time.timestamp())}:F> (dans **{format_timedelta(scheduled_start_time - datetime.now(timezone.utc))}**). "
-                   f"Les inscriptions sont maintenant ouvertes !")
-
-    # Message de confirmation qui sera supprimé après un délai
-    confirmation_msg = await ctx.send(f"L'événement **'{event_name}'** est planifié pour démarrer le <t:{int(scheduled_start_time.timestamp())}:F>.", ephemeral=True)
-    await _delete_messages_after_delay(ctx, confirmation_msg, delay=30)
-
-
-@bot.command(name='cloture_event', usage='<Nom de l\'événement>')
-@commands.has_permissions(manage_roles=True)
-async def cloture_event_command(ctx, *event_name_parts):
-    """
-    Clôture manuellement un événement en cours ou annule un événement planifié.
-    Ex: !cloture_event Ma Super Partie
-    """
-    event_name = " ".join(event_name_parts)
-    events_ref = db.collection('events')
-    existing_event_docs = events_ref.where('name', '==', event_name).get()
-
-    if not existing_event_docs:
-        response_msg = await ctx.send(f"L'événement **'{event_name}'** n'existe pas ou est déjà terminé.", ephemeral=True)
-        await _delete_messages_after_delay(ctx, response_msg, delay=30)
-        return
-
-    event_doc = existing_event_docs[0]
-    event_doc_id = event_doc.id
-    event_data = event_doc.to_dict()
-
-    response_msg = await ctx.send(f"L'événement **'{event_name}'** est en cours de clôture...", ephemeral=True)
-    
-    # Vérifie si c'est un événement planifié ou actif
-    if 'scheduled_start_time' in event_data:
-        # C'est un événement planifié, on l'annule
-        await _cancel_event(event_doc_id, "Annulé manuellement par un administrateur.")
-        confirmation_msg = await ctx.send(f"L'événement planifié **'{event_name}'** a été annulé manuellement.", ephemeral=True)
+    await ctx.message.delete(delay=60)
+    if event_name in events_en_cours and events_en_cours[event_name]['type'] == 'immédiat':
+        await ctx.send(f"📢 L'événement '{event_name}' va être terminé manuellement.", delete_after=60)
+        await finir_event(event_name, ctx.guild)
     else:
-        # C'est un événement actif, on le clôture
-        await _close_event(event_doc_id, ctx.guild)
-        confirmation_msg = await ctx.send(f"L'événement **'{event_name}'** a été clôturé manuellement.", ephemeral=True)
+        await ctx.send(f"❌ L'événement '{event_name}' n'est pas un événement immédiat actif.", delete_after=60)
 
-    await _delete_messages_after_delay(ctx, response_msg, delay=30)
-    await _delete_messages_after_delay(ctx, confirmation_msg, delay=30)
 
-@bot.command(name='annule_concours', usage='<Titre du concours>')
-@commands.has_permissions(manage_roles=True)
-async def annule_concours(ctx, *raffle_title_parts):
+@bot.command(name='end_event_plan')
+@has_manage_roles()
+async def end_event_plan(ctx, event_name):
     """
-    Annule un concours en cours.
-    Ex: !annule_concours Un lot de 50€
+    Termine manuellement un événement planifié.
+    Exemple: !end_event_plan "Tournoi de foot"
     """
-    raffle_title = " ".join(raffle_title_parts)
-    raffle_ref = db.collection('raffles')
-    raffle_docs = raffle_ref.where('title', '==', raffle_title).get()
+    await ctx.message.delete(delay=60)
+    if event_name in events_en_cours and events_en_cours[event_name]['type'] == 'planifié':
+        await ctx.send(f"📢 L'événement planifié '{event_name}' va être terminé manuellement.", delete_after=60)
+        await finir_event(event_name, ctx.guild)
+    else:
+        await ctx.send(f"❌ L'événement '{event_name}' n'est pas un événement planifié actif.", delete_after=60)
 
-    if not raffle_docs:
-        await ctx.send(f"Le concours '{raffle_title}' n'existe pas.", ephemeral=True)
-        return
-
-    raffle_doc = raffle_docs[0]
-    await ctx.send(f"@everyone ❌ Le concours **'{raffle_title}'** a été annulé par un administrateur.")
-    raffle_doc.reference.delete()
-    
-    await ctx.send(f"Le concours **'{raffle_title}'** a été annulé et supprimé.", ephemeral=True)
 
 @bot.command(name='list_events')
 async def list_events(ctx):
     """
-    Affiche la liste de tous les événements actifs et planifiés.
+    Affiche tous les événements actifs.
     """
-    events_ref = db.collection('events')
-    active_events_docs = events_ref.stream()
-
-    events_list = []
-    for doc in active_events_docs:
-        events_list.append(doc.to_dict())
-
-    if not events_list:
-        response_msg = await ctx.send("[ STATUT ] Aucun événement actif ou planifié pour le moment.", ephemeral=True)
-        await _delete_messages_after_delay(ctx, response_msg, delay=30)
+    await ctx.message.delete(delay=60)
+    if not events_en_cours:
+        await ctx.send("Aucun événement actif pour le moment.", delete_after=60)
         return
 
-    embed = discord.Embed(
-        title="Événements en cours",
-        description="""
-        Poxel est votre agent de liaison pour organiser les événements sur le serveur.
-        Voici la liste des événements actifs et planifiés :
-        """,
-        color=discord.Color.from_rgb(255, 105, 180)
-    )
-
-    for data in events_list:
-        guild = bot.get_guild(data['guild_id'])
-        role = guild.get_role(data['role_id']) if guild else None
+    description = "Voici la liste des événements actuellement en cours ou planifiés :\n\n"
+    for event_name, event_data in events_en_cours.items():
+        participants = len(event_data['participants'])
+        role = ctx.guild.get_role(event_data['role_id'])
+        salon = ctx.guild.get_channel(event_data['salon_attente_id'])
         
-        participants_count = len(data.get('participants', []))
-        
-        # Détermine si l'événement est actif ou planifié
-        if 'scheduled_start_time' in data:
-            status = "PLANIFIÉ"
-            time_info = f"Début de l'événement : <t:{int(data['scheduled_start_time'].timestamp())}:R>"
-            field_name = f"➤ [PLANIFIÉ] {data['name']}"
-        else:
-            status = "EN COURS"
-            time_info = f"Fin de l'événement : <t:{int(data['end_time'].timestamp())}:R>"
-            field_name = f"➤ [EN COURS] {data['name']}"
-
-        embed.add_field(
-            name=field_name,
-            value=(
-                f"**Rôle attribué :** {role.name if role else 'INTROUVABLE'}\n"
-                f"**Participants :** {participants_count} / {data['max_participants']}\n"
-                f"**Participants Min :** {data['min_participants']}\n"
-                f"**Statut :** {status}\n"
-                f"**{time_info}**\n"
-            ),
-            inline=False
-        )
-    embed.set_footer(text="[ GESTION PAR POXEL ]  |  PRÊT AU COMBAT  |  WAEKY")
-    embed.timestamp = datetime.now()
-    
-    response_msg = await ctx.send(embed=embed)
-    await _delete_messages_after_delay(ctx, response_msg, delay=30)
-
-
-@bot.command(name='tirage_au_sort', usage='<Titre du concours> <nombre_de_gagnants>')
-@commands.has_permissions(manage_roles=True)
-async def tirage_au_sort(ctx, *raffle_title_and_winners):
-    """
-    Crée un concours où les membres peuvent s'inscrire pour un tirage au sort.
-    Ex: !tirage_au_sort Un lot de 50€ 10
-    """
-    if len(raffle_title_and_winners) < 2:
-        await ctx.send("Veuillez spécifier un titre pour le concours et le nombre de gagnants. `!tirage_au_sort titre_du_concours nombre_de_gagnants`", ephemeral=True)
-        return
-
-    try:
-        num_winners = int(raffle_title_and_winners[-1])
-    except ValueError:
-        await ctx.send("Le nombre de gagnants doit être un nombre valide.", ephemeral=True)
-        return
-
-    raffle_title = " ".join(raffle_title_and_winners[:-1])
-
-    if not raffle_title:
-        await ctx.send("Veuillez spécifier un titre pour le concours.", ephemeral=True)
-        return
-    if num_winners <= 0:
-        await ctx.send("Le nombre de gagnants doit être supérieur à zéro.", ephemeral=True)
-        return
-    
-    raffle_ref = db.collection('raffles')
-    existing_raffle_docs = raffle_ref.where('title', '==', raffle_title).get()
-    if existing_raffle_docs:
-        await ctx.send(f"Un concours avec le titre '{raffle_title}' existe déjà.", ephemeral=True)
-        return
-    
-    raffle_data = {
-        'title': raffle_title,
-        'winners_count': num_winners,
-        'participants': [],
-        'guild_id': ctx.guild.id,
-        'channel_id': ctx.channel.id,
-        'is_active': True,
-        'created_at': datetime.now(timezone.utc)
-    }
-
-    doc_ref = raffle_ref.add(raffle_data)
-    raffle_firestore_id = doc_ref[1].id
-    
-    embed = discord.Embed(
-        title=f"Nouveau concours : {raffle_title}",
-        description=f"🎉 Un tout nouveau concours a été lancé ! 🎉\n\n"
-                    f"Pour participer, cliquez sur le bouton `PARTICIPER` ci-dessous.\n"
-                    f"**Nombre de gagnants :** {num_winners}\n\n"
-                    f"Bonne chance à tous !",
-        color=discord.Color.from_rgb(255, 215, 0)
-    )
-    embed.set_footer(text="Cliquez sur 'PARTICIPER' pour tenter votre chance !")
-    
-    view = discord.ui.View(timeout=None)
-    join_button = discord.ui.Button(
-        label="PARTICIPER",
-        style=discord.ButtonStyle.green,
-        custom_id=f"join_raffle_{raffle_firestore_id}"
-    )
-    view.add_item(join_button)
-
-    raffle_message = await ctx.send(embed=embed, view=view)
-    raffle_ref.document(raffle_firestore_id).update({'message_id': raffle_message.id})
-    
-    await ctx.send(f"@everyone 🎁 **Nouveau concours** : {raffle_title} ! Tente ta chance ici : {raffle_message.jump_url}")
-
-@bot.command(name='cloture_concours', usage='<titre_du_concours>')
-@commands.has_permissions(manage_roles=True)
-async def cloture_concours(ctx, *raffle_title_parts):
-    """
-    Tire au sort les gagnants d'un concours en cours.
-    Ex: !cloture_concours Un lot de 50€
-    """
-    raffle_title = " ".join(raffle_title_parts)
-    raffle_ref = db.collection('raffles')
-    raffle_docs = raffle_ref.where('title', '==', raffle_title).get()
-
-    if not raffle_docs:
-        await ctx.send(f"Le concours '{raffle_title}' n'existe pas.", ephemeral=True)
-        return
-    
-    raffle_doc = raffle_docs[0]
-    raffle_data = raffle_doc.to_dict()
-    participants = raffle_data.get('participants', [])
-    num_winners = raffle_data['winners_count']
-
-    if not participants:
-        await ctx.send(f"Il n'y a aucun participant inscrit au concours '{raffle_title}'. Il est annulé.", ephemeral=True)
-        await ctx.send(f"@everyone ❌ Le concours **'{raffle_title}'** est annulé car il n'y a aucun participant.")
-        raffle_doc.reference.delete()
-        return
-
-    if len(participants) < num_winners:
-        await ctx.send(f"Il n'y a pas assez de participants ({len(participants)}) pour tirer {num_winners} gagnants. Le concours a été annulé.", ephemeral=True)
-        await ctx.send(f"@everyone ❌ Le concours **'{raffle_title}'** est annulé car il n'y a pas assez de participants.")
-        raffle_doc.reference.delete()
-        return
-
-    winners_ids = random.sample(participants, k=num_winners)
-    winners_mentions = [f'<@{w_id}>' for w_id in winners_ids]
-    
-    winners_str = ", ".join(winners_mentions)
-    
-    embed = discord.Embed(
-        title=f"Résultats du concours : {raffle_title}",
-        description=f"🎉 **Félicitations aux gagnants !** 🎉\n\n"
-                    f"Les gagnants sont : {winners_str}",
-        color=discord.Color.from_rgb(0, 255, 0)
-    )
-
-    await ctx.send(f"@everyone 🏆 Le tirage au sort de **{raffle_title}** est terminé ! Découvrez les gagnants ci-dessous :", embed=embed)
-    
-    # Désactiver le tirage au sort en cours et supprimer l'entrée de la base de données
-    raffle_doc.reference.delete()
-
-
-@bot.command(name='help')
-async def help_command(ctx):
-    """
-    Affiche un message d'aide détaillé.
-    """
-    commands_info = {
-        "create_event": {
-            "description": "Crée un nouvel événement immédiat.",
-            "usage": "`!create_event @rôle #salon #salon_d_attente durée(ex: 2h) max_participants min_participants étiquette_participants Nom de l'événement`\n"
-                     "Ex: `!create_event @Joueur #salon-jeu #attente 1h30m 4 2 joueurs Partie de Donjons`"
-        },
-        "planifier_evenement": {
-            "description": "Planifie un événement pour un lancement ultérieur.",
-            "usage": "`!planifier_evenement @rôle #salon #salon_d_attente durée date_début(YYYY-MM-DDTHH:mm) max_participants min_participants étiquette_participants Nom`\n"
-                     "Ex: `!planifier_evenement @RoleGaming #prive #attente 2h 2024-08-01T20:00 10 5 joueurs Soirée Futur`"
-        },
-        "cloture_event": {
-            "description": "Clôture un événement en cours ou annule un événement planifié.",
-            "usage": "`!cloture_event Nom de l'événement`\n"
-                     "Ex: `!cloture_event Ma Super Partie`"
-        },
-        "tirage_au_sort": {
-            "description": "Crée un concours où les membres peuvent s'inscrire pour un tirage au sort.",
-            "usage": "`!tirage_au_sort titre_du_concours nombre_de_gagnants`\n"
-                     "Ex: `!tirage_au_sort Un lot de 50€ 10`"
-        },
-        "cloture_concours": {
-            "description": "Tire au sort les gagnants d'un concours et l'annonce.",
-            "usage": "`!cloture_concours titre_du_concours`"
-        },
-        "annule_concours": {
-            "description": "Annule un concours en cours.",
-            "usage": "`!annule_concours titre_du_concours`"
-        },
-        "list_events": {
-            "description": "Affiche tous les événements actifs avec leurs détails.",
-            "usage": "`!list_events`"
-        },
-        "help": {
-            "description": "Affiche ce message d'aide pour Poxel.",
-            "usage": "`!help`"
-        }
-    }
-
-    embed = discord.Embed(
-        title="Aide Poxel",
-        description="""
-        Salut waeky ! Je suis Poxel, ton agent de liaison personnel.
-        Voici la liste de mes commandes pour t'aider à organiser des événements et des concours :
-        """,
-        color=discord.Color.from_rgb(255, 105, 180)
-    )
-
-    for command_name, info in commands_info.items():
-        embed.add_field(
-            name=f"!{command_name}",
-            value=f"{info['description']}\nUtilisation : {info['usage']}",
-            inline=False
+        description += (
+            f"**`{event_name}`**\n"
+            f"  > **Type** : {event_data['type']}\n"
+            f"  > **Participants** : {participants} {event_data['participant_nom']}(s)\n"
+            f"  > **Rôle** : {role.mention if role else 'Non trouvé'}\n"
+            f"  > **Salon** : {salon.mention if salon else 'Non trouvé'}\n"
         )
     
-    embed.set_footer(text="Poxel est là pour vous aider, waeky !")
-    response_msg = await ctx.send(embed=embed)
-    await _delete_messages_after_delay(ctx, response_msg, delay=60) # Délai plus long pour l'aide
+    embed = creer_embed("Events en cours", description)
+    await ctx.send(embed=embed, delete_after=60)
 
-# --- Listener pour les interactions (boutons) ---
+# --- Système d'aide personnalisé ---
 
+@bot.group(name='helpoxel', invoke_without_command=True)
+async def helpoxel(ctx):
+    """
+    Affiche la liste des commandes disponibles.
+    """
+    await ctx.message.delete(delay=60)
+    description = (
+        "🤖 **Bienvenue dans le manuel de Poxel !** 🤖\n"
+        "Utilise `!helpoxel <commande>` pour plus de détails sur une commande spécifique.\n\n"
+        "**Commandes d'événement :**\n"
+        " - `!create_event` : Crée un événement qui démarre immédiatement.\n"
+        " - `!create_event_plan` : Planifie un événement à une date et heure précises.\n"
+        " - `!end_event` : Termine manuellement un événement immédiat.\n"
+        " - `!end_event_plan` : Termine manuellement un événement planifié.\n"
+        " - `!list_events` : Affiche les événements actifs.\n"
+    )
+    embed = creer_embed("Manuel de Poxel", description)
+    await ctx.send(embed=embed, delete_after=300)
+
+@helpoxel.command(name='create_event')
+async def help_create_event(ctx):
+    """
+    Aide pour la commande create_event.
+    """
+    await ctx.message.delete(delay=60)
+    embed = creer_embed(
+        "Manuel de Poxel : !create_event",
+        "**Usage** : `!create_event <nom_event> <nom_participant> <nom_role> <nom_salon> <durée_en_min>`\n"
+        "**Exemple** : `!create_event \"Chasse au trésor\" chasseur \"Aventuriers\" \"chasse-au-tresor\" 60`\n\n"
+        "Crée un événement qui démarre immédiatement avec un rôle et un salon dédiés. Les participants rejoignent via un bouton et le rôle leur donne accès au salon. L'événement se termine automatiquement après la durée spécifiée."
+    )
+    await ctx.send(embed=embed, delete_after=300)
+
+@helpoxel.command(name='create_event_plan')
+async def help_create_event_plan(ctx):
+    """
+    Aide pour la commande create_event_plan.
+    """
+    await ctx.message.delete(delay=60)
+    embed = creer_embed(
+        "Manuel de Poxel : !create_event_plan",
+        "**Usage** : `!create_event_plan <nom_event> <nom_participant> <nom_role> <nom_salon> <durée_en_min> <YYYY-MM-DD> <HH:MM>`\n"
+        "**Exemple** : `!create_event_plan \"Tournoi de foot\" footballeur \"Footballeurs\" \"stade-de-foot\" 120 2025-08-08 20:00`\n\n"
+        "Planifie un événement à une date et heure précises. L'événement démarre automatiquement à l'heure prévue et se termine après la durée spécifiée."
+    )
+    await ctx.send(embed=embed, delete_after=300)
+
+
+# --- Démarrage du bot ---
 @bot.event
-async def on_interaction(interaction):
+async def on_ready():
     """
-    Gère les clics sur les boutons.
+    Indique que le bot est prêt et démarre la tâche de suppression de messages.
     """
-    if interaction.type == discord.InteractionType.component:
-        custom_id_parts = interaction.data['custom_id'].split('_')
-        
-        # Gérer les boutons d'événements
-        if len(custom_id_parts) >= 3 and custom_id_parts[1] == 'event':
-            action = custom_id_parts[0]
-            event_firestore_id = custom_id_parts[2]
-            
-            if action in ['join', 'leave']:
-                await handle_event_participation(interaction, event_firestore_id, action)
-        
-        # Gérer les boutons de tirages au sort
-        elif len(custom_id_parts) >= 3 and custom_id_parts[1] == 'raffle':
-            action = custom_id_parts[0]
-            raffle_firestore_id = custom_id_parts[2]
+    print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
+    bot.loop.create_task(supprimer_messages_apres_delai())
 
-            if action == 'join':
-                await handle_raffle_join(interaction, raffle_firestore_id)
-
-    await bot.process_commands(interaction)
-
-async def handle_event_participation(interaction: discord.Interaction, event_firestore_id: str, action: str):
-    """
-    Gère les clics sur les boutons "Participer" et "Quitter" pour les événements.
-    """
-    user = interaction.user
-    event_ref = db.collection('events').document(event_firestore_id)
-    event_doc = event_ref.get()
-
-    if not event_doc.exists:
-        await interaction.response.send_message("Cet événement n'existe plus ou a été terminé.", ephemeral=True)
-        return
-
-    event_data = event_doc.to_dict()
-    event_name = event_data.get('name', 'Nom inconnu')
-    guild = interaction.guild
-    role = guild.get_role(event_data['role_id'])
-    is_scheduled = 'scheduled_start_time' in event_data
-
-    # Vérifie si l'événement est déjà terminé
-    if not is_scheduled and datetime.now(timezone.utc) > event_data.get('end_time', datetime.now(timezone.utc)):
-        await interaction.response.send_message("Cet événement est déjà terminé, vous ne pouvez plus le rejoindre.", ephemeral=True)
-        return
-
-    if not role:
-        await interaction.response.send_message("Le rôle associé à cet événement n'a pas été trouvé. L'événement est peut-être mal configuré.", ephemeral=True)
-        return
-
-    current_participants = set(event_data.get('participants', []))
-    max_participants = event_data['max_participants']
-    waiting_room_channel = guild.get_channel(event_data['waiting_room_channel_id'])
-
-    if action == 'join':
-        if user.id in current_participants:
-            await interaction.response.send_message("Vous êtes déjà inscrit à cet événement.", ephemeral=True)
-            return
-        
-        if len(current_participants) >= max_participants:
-            await interaction.response.send_message("Désolé, cet événement a atteint sa capacité maximale.", ephemeral=True)
-            return
-
-        try:
-            # Si l'événement est planifié, le rôle n'est donné qu'au début
-            if is_scheduled:
-                await interaction.response.send_message(
-                    f"| INFO | INSCRIPTION REÇUE ! Vous avez été ajouté à la liste des participants. Le rôle {role.mention} vous sera attribué au lancement de l'événement.",
-                    ephemeral=True
-                )
-            else:
-                await user.add_roles(role, reason=f"Participation à l'événement {event_name}")
-                await interaction.response.send_message(
-                    f"| INFO | BIENVENUE ! Le rôle {role.mention} vous a été attribué. "
-                    f"Veuillez rejoindre le point de ralliement {waiting_room_channel.mention} et attendre d'être déplacé.",
-                    ephemeral=True
-                )
-
-            event_ref.update({'participants': firestore.ArrayUnion([user.id])})
-            
-            # Mise à jour de l'embed
-            await _update_event_message(guild, event_firestore_id, is_active=not is_scheduled)
-
-        except discord.Forbidden:
-            await interaction.response.send_message("Je n'ai pas les permissions nécessaires pour vous donner ce rôle. Veuillez contacter un administrateur du serveur.", ephemeral=True)
-            return
-        except Exception as e:
-            await interaction.response.send_message(f"Une erreur est survenue lors de votre inscription : `{e}`", ephemeral=True)
-            return
-
-    elif action == 'leave':
-        if user.id not in current_participants:
-            await interaction.response.send_message("Vous ne participez pas à cet événement.", ephemeral=True)
-            return
-
-        try:
-            # Le rôle n'est retiré que si l'événement n'est pas planifié
-            if not is_scheduled and role in user.roles:
-                await user.remove_roles(role, reason=f"Retrait de l'événement {event_name}")
-            
-            event_ref.update({'participants': firestore.ArrayRemove([user.id])})
-            await interaction.response.send_message(f"Vous avez quitté l'événement **'{event_name}'**. Le rôle {role.mention} a été retiré si l'événement était actif.", ephemeral=True)
-            
-            # Mise à jour de l'embed
-            await _update_event_message(guild, event_firestore_id, is_active=not is_scheduled)
-
-        except discord.Forbidden:
-            await interaction.response.send_message("Je n'ai pas les permissions nécessaires pour vous retirer ce rôle. Veuillez contacter un administrateur du serveur.", ephemeral=True)
-            return
-        except Exception as e:
-            await interaction.response.send_message(f"Une erreur est survenue lors de votre départ : `{e}`", ephemeral=True)
-            return
-
-async def handle_raffle_join(interaction: discord.Interaction, raffle_firestore_id: str):
-    """
-    Gère les clics sur les boutons de tirage au sort.
-    """
-    user = interaction.user
-    raffle_ref = db.collection('raffles').document(raffle_firestore_id)
-    raffle_doc = raffle_ref.get()
-
-    if not raffle_doc.exists:
-        await interaction.response.send_message("Ce concours n'existe plus ou est terminé.", ephemeral=True)
-        return
-    
-    raffle_data = raffle_doc.to_dict()
-    if not raffle_data.get('is_active', False):
-        await interaction.response.send_message("Ce concours est déjà terminé.", ephemeral=True)
-        return
-    
-    participants = raffle_data.get('participants', [])
-    if user.id in participants:
-        await interaction.response.send_message("Vous êtes déjà inscrit à ce concours.", ephemeral=True)
-        return
-    
-    raffle_ref.update({'participants': firestore.ArrayUnion([user.id])})
-    await interaction.response.send_message(f"Vous êtes maintenant inscrit au concours **'{raffle_data['title']}'** ! Bonne chance !", ephemeral=True)
-
-# --- Tâches en arrière-plan ---
-
-@tasks.loop(minutes=1)
-async def check_expired_events():
-    """
-    Tâche en arrière-plan pour vérifier et terminer les événements expirés.
-    """
-    try:
-        now = datetime.now(timezone.utc)
-        events_ref = db.collection('events')
-        # Filtre les événements qui ont une `end_time` et qui sont expirés
-        expired_events_docs = events_ref.where('end_time', '<=', now).get()
-        
-        for doc in expired_events_docs:
-            event_data = doc.to_dict()
-            guild = bot.get_guild(event_data['guild_id'])
-            if guild:
-                # Clôture l'événement
-                await _cancel_event(doc.id, "L'événement est terminé")
-            else:
-                # Si la guilde n'existe plus, on supprime l'événement de la DB
-                doc.reference.delete()
-
-    except Exception as e:
-        print(f"Erreur dans la tâche check_expired_events : {e}")
-
-@tasks.loop(minutes=1)
-async def check_scheduled_events():
-    """
-    Tâche en arrière-plan pour lancer les événements planifiés.
-    """
-    try:
-        now = datetime.now(timezone.utc)
-        events_ref = db.collection('events')
-        # Filtre les événements qui ont une `scheduled_start_time` et qui sont prêts à démarrer
-        scheduled_events_docs = events_ref.where('scheduled_start_time', '<=', now).get()
-
-        for doc in scheduled_events_docs:
-            event_data = doc.to_dict()
-            event_firestore_id = doc.id
-            
-            guild = bot.get_guild(event_data['guild_id'])
-            if not guild:
-                doc.reference.delete()
-                print(f"Guilde non trouvée pour l'événement planifié {event_firestore_id}. Événement supprimé.")
-                continue
-
-            participants_count = len(event_data.get('participants', []))
-            if participants_count < event_data['min_participants']:
-                # Annule l'événement si le minimum de participants n'est pas atteint
-                await _cancel_event(event_firestore_id, f"Nombre de participants insuffisant ({participants_count}/{event_data['min_participants']}).")
-                continue
-
-            role = guild.get_role(event_data['role_id'])
-            
-            participants_list = event_data.get('participants', [])
-            for user_id in participants_list:
-                member = guild.get_member(user_id)
-                if member and role:
-                    try:
-                        await member.add_roles(role, reason=f"Lancement de l'événement planifié '{event_data['name']}'")
-                        print(f"Rôle {role.name} donné à {member.display_name} pour l'événement planifié {event_data['name']}")
-                    except discord.Forbidden:
-                        print(f"Permissions insuffisantes pour donner le rôle {role.name} à {member.display_name}")
-                    except Exception as e:
-                        print(f"Erreur lors de l'attribution du rôle à {member.display_name}: {e}")
-
-            # Met à jour le document dans Firestore en le convertissant en événement actif
-            end_time = datetime.now(timezone.utc) + timedelta(seconds=parse_duration(event_data['duration_str']))
-            doc.reference.update({
-                'end_time': end_time,
-                'is_active': True,
-                'message_id': event_data['message_id'],
-                'guild_id': event_data['guild_id']
-            })
-            doc.reference.update({ 'scheduled_start_time': firestore.DELETE_FIELD })
-            
-            # Met à jour les permissions du rôle pour le salon
-            channel = guild.get_channel(event_data['channel_id'])
-            if channel:
-                await channel.set_permissions(guild.default_role, read_messages=False)
-                await channel.set_permissions(role, read_messages=True, send_messages=True)
-            
-            # Met à jour le message embed pour qu'il reflète que l'événement est maintenant actif
-            await _update_event_message(guild, event_firestore_id, is_active=True)
-
-            # Envoie une notification aux participants
-            if channel:
-                mention_list = ' '.join([f'<@{p_id}>' for p_id in participants_list])
-                await channel.send(f"@everyone 🚀 L'événement **'{event_data['name']}'** est maintenant actif et les inscriptions sont fermées ! Rejoignez {guild.get_channel(event_data['waiting_room_channel_id']).mention} pour le briefing.")
-
-    except Exception as e:
-        print(f"Erreur dans la tâche check_scheduled_events : {e}")
-
-@tasks.loop(seconds=10)
-async def update_event_messages():
-    """
-    Tâche en arrière-plan pour rafraîchir les messages des événements actifs et planifiés.
-    """
-    try:
-        events_ref = db.collection('events')
-        active_events_docs = events_ref.stream()
-
-        for doc in active_events_docs:
-            event_data = doc.to_dict()
-            guild = bot.get_guild(event_data['guild_id'])
-            if not guild:
-                continue
-            
-            is_active = 'end_time' in event_data
-            is_expired = False
-            is_cancelled = False
-            
-            if is_active:
-                if datetime.now(timezone.utc) > event_data['end_time']:
-                    is_expired = True
-                
-            await _update_event_message(guild, doc.id, is_active, is_expired, is_cancelled)
-            
-    except Exception as e:
-        print(f"Erreur dans la tâche update_event_messages : {e}")
-
-
-# Exécute le bot
-bot.run(TOKEN)
+if __name__ == '__main__':
+    bot.run(TOKEN)
