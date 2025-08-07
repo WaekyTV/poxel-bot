@@ -85,6 +85,8 @@ def parse_duration(duration_str: str) -> int:
     return total_seconds
 
 NEON_BLUE = 0x009EFF
+NEON_RED = 0xFF073A
+NEON_GREEN = 0x39FF14
 
 def create_retro_embed(title, description="", color=NEON_BLUE):
     """Crée un embed avec un style simple."""
@@ -418,16 +420,17 @@ async def _end_event(event_doc_id: str, context_channel: Optional[discord.TextCh
     
     if event_message:
         try:
-            embed = event_message.embeds[0]
-            embed.color = 0x8B0000
-            embed.description = f"**Événement terminé.**"
-            embed.clear_fields()
+            embed = create_retro_embed(f"ÉVÉNEMENT TERMINÉ : {event_name}", color=NEON_RED)
             
             participants_names = await get_participant_info(guild, participants_list)
             
             embed.add_field(name=f"Participants finaux ({len(participants_list)}/{event_data.get('max_participants', 'N/A')} {event_data.get('participant_label', 'participants')})", value=participants_names, inline=False)
+            
+            # Annoncer la fin de l'événement
+            await channel_waiting.send(f"@everyone L'événement **'{event_name}'** est maintenant terminé. Merci à tous d'avoir participé !", delete_after=60)
+            
             # Les boutons sont supprimés en passant view=None
-            await event_message.edit(content=f"@everyone L'événement **'{event_name}'** est maintenant terminé.", embed=embed, view=None)
+            await event_message.edit(content=f"L'événement **'{event_name}'** est maintenant terminé.", embed=embed, view=None)
         except Exception as e:
             print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
     else:
@@ -459,11 +462,30 @@ async def update_event_messages():
         event_end_time = event_data.get('end_time')
         event_start_time = event_data.get('start_time')
         
+        # Gérer la fin de l'événement
         if event_end_time and event_end_time.astimezone(PARIS_TIMEZONE) < now:
             print(f"Événement '{event_data.get('name', doc.id)}' expiré. Fin de l'événement...")
             await _end_event(doc.id)
             continue
+            
+        # Gérer l'annulation de l'événement pour manque de participants
+        cancellation_deadline = event_start_time.astimezone(PARIS_TIMEZONE) - timedelta(minutes=30)
+        min_participants = 2 # Minimum de participants requis pour ne pas annuler
         
+        # Vérifier si la date d'annulation est dépassée, si l'événement n'a pas commencé et s'il y a trop peu de participants
+        if now > cancellation_deadline and not event_data.get('has_started') and len(event_data.get('participants', [])) < min_participants:
+            print(f"Événement '{event_data.get('name', doc.id)}' annulé faute de participants.")
+            guild = bot.get_guild(event_data.get('guild_id'))
+            if guild:
+                channel_waiting = guild.get_channel(event_data.get('channel_waiting_id'))
+                if channel_waiting:
+                    await channel_waiting.send(f"@everyone ⚠️ L'événement **'{event_data.get('name', 'Nom inconnu')}'** a été annulé car il n'y avait pas assez de participants.")
+            
+            # Utiliser _end_event pour annuler proprement l'événement
+            await _end_event(doc.id)
+            continue
+
+
         # Logique pour le début de l'événement
         if event_start_time and event_start_time.astimezone(PARIS_TIMEZONE) <= now and not event_data.get('has_started'):
             print(f"Événement '{event_data.get('name', doc.id)}' a commencé.")
@@ -471,10 +493,10 @@ async def update_event_messages():
             if guild:
                 channel_waiting = guild.get_channel(event_data.get('channel_waiting_id'))
                 if channel_waiting:
-                    await channel_waiting.send(f"@everyone L'événement **'{event_data.get('name', 'Nom inconnu')}'** a commencé ! Bonne partie !")
+                    await channel_waiting.send(f"@everyone 🚀 L'événement **'{event_data.get('name', 'Nom inconnu')}'** a commencé ! Bonne partie ! (Les inscriptions sont maintenant fermées.)")
             
-            # Mettre à jour l'état de l'événement dans Firestore
-            await asyncio.to_thread(doc.reference.update, {'has_started': True})
+            # Mettre à jour l'état de l'événement dans Firestore et fermer les inscriptions
+            await asyncio.to_thread(doc.reference.update, {'has_started': True, 'registrations_closed': True})
             
             # Mettre à jour le message de l'événement (description et suppression des boutons)
             try:
@@ -482,8 +504,9 @@ async def update_event_messages():
                 if channel_waiting and message_id:
                     event_message = await channel_waiting.fetch_message(message_id)
                     embed = event_message.embeds[0]
-                    embed.color = discord.Color.green()
-                    embed.description = f"**L'événement a commencé !** Il se terminera <t:{int(event_end_time.timestamp())}:R>."
+                    embed.title = f"ÉVÉNEMENT EN COURS : {event_data.get('name', 'Nom inconnu').upper()}"
+                    embed.color = NEON_GREEN
+                    embed.description = f"**L'événement a commencé ! Les inscriptions sont fermées.**"
                     
                     # Les boutons sont supprimés en passant view=None
                     await event_message.edit(embed=embed, view=None)
@@ -501,23 +524,28 @@ async def update_event_messages():
                 if channel_waiting and message_id:
                     event_message = await channel_waiting.fetch_message(message_id)
                     embed = event_message.embeds[0]
-
-                    # Mettre à jour le champ du timer
+                    
                     start_time_timestamp = int(event_start_time.timestamp())
                     end_time_timestamp = int(event_end_time.timestamp())
                     
+                    # Mettre à jour le champ du timer
+                    timer_value = ""
                     if now < event_start_time.astimezone(PARIS_TIMEZONE):
                         # Avant le début de l'événement
                         timer_value = f"Début : <t:{start_time_timestamp}:f> (dans <t:{start_time_timestamp}:R>)"
                     else:
                         # Après le début de l'événement
-                        timer_value = f"Fin : <t:{end_time_stamp}:f> (dans <t:{end_time_stamp}:R>)"
+                        timer_value = f"Fin : <t:{end_time_timestamp}:f> (dans <t:{end_time_timestamp}:R>)"
 
                     # Trouver le champ 'Début' ou 'Fin' et le mettre à jour
+                    timer_field_found = False
                     for i, field in enumerate(embed.fields):
                         if field.name.startswith("Début") or field.name.startswith("Fin"):
                             embed.set_field_at(i, name="Début / Fin", value=timer_value, inline=False)
+                            timer_field_found = True
                             break
+                    if not timer_field_found:
+                        embed.add_field(name="Début / Fin", value=timer_value, inline=False)
                     
                     await event_message.edit(embed=embed)
 
