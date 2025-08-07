@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 # Import des bibliothèques Firebase
 import firebase_admin
 from firebase_admin import credentials
-from google.cloud import firestore
+# Correction ici : on importe le client firestore depuis firebase_admin
+from firebase_admin import firestore
 
 # Charger les variables d'environnement depuis le fichier .env (pour les tests locaux)
 load_dotenv()
@@ -33,7 +34,7 @@ try:
     # On initialise la connexion à Firebase en utilisant le contenu JSON de la variable d'environnement.
     cred = credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(cred)
-    db = firestore.client()
+    db = firestore.client() # C'est maintenant la bonne méthode qui est appelée
     print("Firebase Admin SDK initialisé avec succès.")
 except Exception as e:
     print(f"Erreur lors de l'initialisation de Firebase Admin SDK: {e}")
