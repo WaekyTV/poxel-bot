@@ -6,28 +6,37 @@ import asyncio
 import os
 import random
 import re
+import json
 from dotenv import load_dotenv
 
 # Import des bibliothèques Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# Charger les variables d'environnement depuis le fichier .env
+# Charger les variables d'environnement depuis le fichier .env (pour les tests locaux)
 load_dotenv()
+
+# Récupérer le token du bot depuis les variables d'environnement
 BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 
 # --- Configuration Firebase ---
-# Le fichier 'serviceAccountKey.json' doit être dans le même dossier que ce script.
 try:
-    # On initialise la connexion à Firebase en utilisant le fichier de clé.
-    cred_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY_PATH', 'serviceAccountKey.json')
-    cred = credentials.Certificate(cred_path)
+    # On récupère le contenu de la clé Firebase depuis une variable d'environnement sur Render.
+    firebase_json_key = os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY_JSON')
+    if not firebase_json_key:
+        raise ValueError("La variable d'environnement 'FIREBASE_SERVICE_ACCOUNT_KEY_JSON' n'est pas définie sur Render.")
+
+    # On convertit la chaîne JSON en dictionnaire Python pour l'utiliser comme une clé.
+    service_account_info = json.loads(firebase_json_key)
+
+    # On initialise la connexion à Firebase en utilisant le contenu JSON de la variable d'environnement.
+    cred = credentials.Certificate(service_account_info)
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("Firebase Admin SDK initialisé avec succès.")
 except Exception as e:
     print(f"Erreur lors de l'initialisation de Firebase Admin SDK: {e}")
-    print("Assure-toi que le chemin 'FIREBASE_SERVICE_ACCOUNT_KEY_PATH' est correct et que le fichier de clé est présent.")
+    print("Assure-toi que la variable d'environnement 'FIREBASE_SERVICE_ACCOUNT_KEY_JSON' est bien configurée sur Render.")
     exit()
 
 # Définir le préfixe de commande et les intents nécessaires
@@ -175,14 +184,24 @@ class EventButtons(View):
             try:
                 original_message = interaction.message
                 if original_message:
-                    embed = original_message.embeds[0]
-                    embed.set_field_at(
-                        index=2 if event_data.get('is_contest') else 1, # Index du champ "Capacité" ou "Participants"
-                        name="<:retro_user:123456789012345678> Participants",
-                        value=f"**{updated_participants_count}** / **{max_participants}** {participant_label}",
-                        inline=False
-                    )
-                    await original_message.edit(embed=embed)
+                    # Trouver le bon index pour mettre à jour le champ des participants
+                    # C'est un peu plus complexe car l'index peut varier s'il s'agit d'un concours ou non.
+                    fields = original_message.embeds[0].fields
+                    participants_index = -1
+                    for i, field in enumerate(fields):
+                        if "Participants" in field.name:
+                            participants_index = i
+                            break
+                    
+                    if participants_index != -1:
+                        embed = original_message.embeds[0]
+                        embed.set_field_at(
+                            index=participants_index,
+                            name=fields[participants_index].name,
+                            value=f"**{updated_participants_count}** / **{max_participants}** {participant_label}",
+                            inline=False
+                        )
+                        await original_message.edit(embed=embed)
             except Exception as e:
                 print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
 
