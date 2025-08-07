@@ -72,7 +72,7 @@ def create_retro_embed(title, description="", color=NEON_BLUE):
         color=color
     )
     embed.set_author(name="Poxel OS", icon_url="https://placehold.co/64x64/009eff/ffffff?text=P")
-    embed.set_footer(text="Système d'événements Poxel - Mode Rétro �")
+    embed.set_footer(text="Système d'événements Poxel - Mode Rétro 💾")
     return embed
 
 # --- Classes de vues et de boutons pour l'interaction utilisateur ---
@@ -540,4 +540,3 @@ async def help_command(ctx):
 
 # --- Démarrage du Bot ---
 bot.run(BOT_TOKEN)
-�
