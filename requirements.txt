@@ -4,3 +4,6 @@ discord.py
 firebase-admin
 python-dotenv
 gunicorn
+
+discord.py==2.3.2
+humanize
