@@ -8,6 +8,7 @@ import random
 import re
 import json
 from dotenv import load_dotenv
+import pytz # Import de la bibliothèque pour la gestion des fuseaux horaires
 
 # Import des bibliothèques Firebase
 import firebase_admin
@@ -52,6 +53,9 @@ intents.presences = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Fonctions Utilitaires ---
+
+# Définir le fuseau horaire de Paris
+PARIS_TIMEZONE = pytz.timezone('Europe/Paris')
 
 def parse_duration(duration_str: str) -> int:
     """
@@ -154,9 +158,9 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
             return
         
         # Vérifier si l'événement a déjà commencé
-        now = datetime.now()
+        now = datetime.now(PARIS_TIMEZONE)
         start_time = event_data.get('start_time')
-        if start_time and start_time.astimezone() <= now.astimezone():
+        if start_time and start_time.astimezone(PARIS_TIMEZONE) <= now:
             await interaction.followup.send("Désolé, les inscriptions sont fermées car l'événement a déjà commencé.", ephemeral=True)
             return
 
@@ -227,6 +231,8 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
                     view.children[0].disabled = True
                 
                 await original_message.edit(embed=embed, view=view)
+        except discord.NotFound:
+            print(f"Erreur : Le message original de l'événement {event_data.get('name', 'nom inconnu')} n'a pas été trouvé. Il a peut-être été supprimé.")
         except Exception as e:
             print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
 
@@ -365,13 +371,16 @@ async def _end_event(event_doc_id: str):
                 await event_message.edit(embed=embed, view=None) # view=None pour retirer les boutons
                 await channel_waiting.send(f"@everyone L'événement **'{event_name}'** est maintenant terminé.")
     except discord.NotFound:
-        print(f"Message de l'événement {event_name} non trouvé sur Discord.")
+        print(f"Erreur : Message de l'événement {event_name} non trouvé sur Discord. L'événement sera supprimé de la base de données.")
+        # Le message est supprimé, donc on peut nettoyer la base de données.
+        await asyncio.to_thread(event_ref.delete)
     except Exception as e:
         print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
-
-    # Supprimer l'événement de Firestore
-    await asyncio.to_thread(event_ref.delete)
-    print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
+        
+    # Si le message existe toujours, on supprime l'événement après la mise à jour.
+    if event_doc.exists:
+        await asyncio.to_thread(event_ref.delete)
+        print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
 
 
 @tasks.loop(minutes=1)
@@ -379,7 +388,7 @@ async def check_expired_events():
     """Tâche en arrière-plan pour vérifier et terminer les événements expirés."""
     print("Vérification des événements expirés...")
     events_ref = db.collection('events')
-    now = datetime.now()
+    now = datetime.now(PARIS_TIMEZONE)
     
     # Utiliser to_thread pour éviter de bloquer l'event loop
     active_events_docs = await asyncio.to_thread(events_ref.stream)
@@ -388,8 +397,7 @@ async def check_expired_events():
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
         
-        # On peut comparer directement l'objet Timestamp de Firestore avec un objet datetime
-        if event_end_time and event_end_time.astimezone() < now.astimezone():
+        if event_end_time and event_end_time.astimezone(PARIS_TIMEZONE) < now:
             print(f"Événement '{event_data.get('name', doc.id)}' expiré. Fin de l'événement...")
             await _end_event(doc.id)
 
@@ -413,15 +421,19 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
         duration_seconds = parse_duration(duration)
         if duration_seconds <= 0:
             raise ValueError("La durée doit être positive.")
-
-        now = datetime.now()
+        
+        now_paris = datetime.now(PARIS_TIMEZONE)
         
         # Gestion de l'heure et de la date de début
         if start_date:
-            start_datetime = datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M")
+            # Créer un objet datetime non-naïf directement dans le fuseau horaire de Paris
+            start_datetime = PARIS_TIMEZONE.localize(datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M"))
         else:
-            start_datetime = datetime.strptime(start_time, "%Hh%M").replace(year=now.year, month=now.month, day=now.day)
-            if start_datetime < now:
+            # Créer un objet datetime non-naïf pour aujourd'hui dans le fuseau horaire de Paris
+            start_datetime = PARIS_TIMEZONE.localize(datetime.strptime(start_time, "%Hh%M")).replace(year=now_paris.year, month=now_paris.month, day=now_paris.day)
+            
+            # Si l'heure de début est déjà passée aujourd'hui, la décaler au lendemain
+            if start_datetime < now_paris:
                 start_datetime += timedelta(days=1)
         
         end_datetime = start_datetime + timedelta(seconds=duration_seconds)
@@ -547,6 +559,11 @@ async def list_events(ctx):
         participants_count = len(participants_data)
         
         participants_names = await get_participant_info(guild, participants_data)
+        
+        # S'assurer que les temps existent avant d'essayer de les formater
+        end_time_stamp = int(data['end_time'].timestamp()) if data.get('end_time') else 'N/A'
+        start_time_stamp = int(data['start_time'].timestamp()) if data.get('start_time') else 'N/A'
+
 
         embed.add_field(
             name=f"🎮 {data.get('name', 'Événement sans nom')}",
@@ -555,7 +572,7 @@ async def list_events(ctx):
                 f"**Point de ralliement :** {channel_waiting.mention if channel_waiting else 'Introuvable'}\n"
                 f"**Salon privé :** {channel_private.mention if channel_private else 'Introuvable'}\n"
                 f"**Participants ({participants_count}/{data.get('max_participants', 'N/A')} {data.get('participant_label', 'participants')}) :**\n{participants_names}\n"
-                f"**Fin :** <t:{int(data.get('end_time').timestamp())}:R>"
+                f"**Début :** <t:{start_time_stamp}:f> (se termine <t:{end_time_stamp}:R>)"
             ),
             inline=False
         )
