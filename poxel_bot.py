@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials
 from google.cloud import firestore
-from google.cloud.firestore import Timestamp
 
 # Charger les variables d'environnement depuis le fichier .env (pour les tests locaux)
 load_dotenv()
@@ -380,11 +379,10 @@ async def check_expired_events():
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
         
-        # Correction de l'erreur : utilisez firestore.Timestamp, pas firestore.firestore.Timestamp
-        if event_end_time and isinstance(event_end_time, Timestamp):
-            if event_end_time.astimezone() < now.astimezone():
-                print(f"Événement '{event_data.get('name', doc.id)}' expiré. Fin de l'événement...")
-                await _end_event(doc.id)
+        # On peut comparer directement l'objet Timestamp de Firestore avec un objet datetime
+        if event_end_time and event_end_time.astimezone() < now.astimezone():
+            print(f"Événement '{event_data.get('name', doc.id)}' expiré. Fin de l'événement...")
+            await _end_event(doc.id)
 
 
 # --- Commandes du bot ---
