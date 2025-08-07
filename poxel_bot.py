@@ -177,7 +177,7 @@ class EventButtons(View):
                 if original_message:
                     embed = original_message.embeds[0]
                     embed.set_field_at(
-                        index=3, # Index du champ "Capacité" ou "Participants"
+                        index=2 if event_data.get('is_contest') else 1, # Index du champ "Capacité" ou "Participants"
                         name="<:retro_user:123456789012345678> Participants",
                         value=f"**{updated_participants_count}** / **{max_participants}** {participant_label}",
                         inline=False
@@ -228,6 +228,19 @@ async def _end_event(event_doc_id: str):
             
             if channel:
                 await channel.send(f"@everyone CONCOURS TERMINÉ : **{event_name}**", embed=winner_embed)
+
+            # Envoyer un message privé à chaque gagnant
+            for winner_id in winners_id:
+                winner_member = guild.get_member(winner_id)
+                if winner_member:
+                    try:
+                        await winner_member.send(f"Félicitations ! 🎉 Vous avez été tiré au sort comme gagnant du concours **'{event_name}'** sur le serveur **{guild.name}** !")
+                        print(f"Message privé envoyé à {winner_member.display_name} pour le concours '{event_name}'.")
+                    except discord.Forbidden:
+                        print(f"Impossible d'envoyer un message privé à {winner_member.display_name}. Les DMs sont désactivés.")
+                    except Exception as e:
+                        print(f"Erreur lors de l'envoi du message privé à {winner_member.display_name} : {e}")
+
         else:
             if channel:
                 await channel.send(f"@everyone 🛑 Le concours '{event_name}' a été annulé car il n'y a pas assez de participants.")
@@ -282,7 +295,7 @@ async def check_expired_events():
 
 # --- Commandes du bot ---
 
-async def _create_event_handler(ctx, role: discord.Role, duration: str, start_time: str, channel: discord.TextChannel, max_participants: int, participant_label: str, event_name: str, is_contest: bool, winner_count: int = 1, start_date: str = None):
+async def _create_event_handler(ctx, role: discord.Role, channel: discord.TextChannel, duration: str, max_participants: int, participant_label: str, event_name: str, is_contest: bool, winner_count: int = 1, start_date: str = None, start_time: str = None):
     """Fonction interne pour gérer la création d'un événement ou d'un concours."""
     
     # Vérifier si l'événement existe déjà dans Firestore
@@ -301,13 +314,11 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
 
         now = datetime.now()
         
-        if start_date:
+        if start_date and start_time:
             start_datetime = datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M")
         else:
-            start_hour, start_minute = map(int, start_time.split('h'))
-            start_datetime = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-            if start_datetime < now:
-                start_datetime += timedelta(days=1)
+            # Pour un événement "immédiat", l'heure de début est l'heure actuelle
+            start_datetime = now
         
         end_datetime = start_datetime + timedelta(seconds=duration_seconds)
 
@@ -315,7 +326,7 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
             raise ValueError("La date et l'heure de début doivent être dans le futur.")
 
     except (ValueError, IndexError, TypeError) as e:
-        await ctx.send(f"❌ Erreur de format des arguments. {e}\nUtilisation correcte dans `!help_create_event`", delete_after=60)
+        await ctx.send(f"❌ Erreur de format des arguments. {e}\nUtilisation correcte dans `!helpoxel`", delete_after=60)
         await asyncio.sleep(60)
         await ctx.message.delete()
         return
@@ -361,7 +372,11 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
     if is_contest:
         embed.add_field(name="<:retro_prize:123456789012345678> Gagnants", value=f"**{winner_count}** {participant_label}(s) seront tirés au sort !", inline=False)
     
-    embed.add_field(name="<:retro_time:123456789012345678> Durée", value=f"Commence à <t:{int(start_datetime.timestamp())}:f> (se termine <t:{int(end_datetime.timestamp())}:R>)", inline=False)
+    if start_date and start_time:
+        embed.add_field(name="<:retro_time:123456789012345678> Durée", value=f"Commence le <t:{int(start_datetime.timestamp())}:f> (se termine <t:{int(end_datetime.timestamp())}:R>)", inline=False)
+    else:
+        embed.add_field(name="<:retro_time:123456789012345678> Durée", value=f"Commence maintenant (se termine <t:{int(end_datetime.timestamp())}:R>)", inline=False)
+    
     embed.add_field(name="<:retro_user:123456789012345678> Participants", value=f"**0** / **{max_participants}** {participant_label}", inline=False)
 
     await temp_message.edit(content=announcement_text, embed=embed, view=view)
@@ -371,13 +386,13 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
 @bot.command(name='create_event')
 @commands.has_permissions(manage_roles=True)
 async def create_event(ctx, role: discord.Role, channel: discord.TextChannel, duration: str, max_participants: int, participant_label: str, *, event_name: str):
-    """Crée un événement immédiat. Ex: !create_event @Joueur #salon-jeu 1h30m 4 joueurs Partie de Donjons"""
+    """Crée un événement immédiat. Ex: !create_event @Joueur #salon-jeu 1h30m 10 joueurs Partie de Donjons"""
     await _create_event_handler(ctx, role=role, channel=channel, duration=duration, max_participants=max_participants, participant_label=participant_label, event_name=event_name, is_contest=False)
 
 @bot.command(name='create_event_plan')
 @commands.has_permissions(manage_roles=True)
 async def create_event_plan(ctx, role: discord.Role, channel: discord.TextChannel, duration: str, start_date: str, start_time: str, max_participants: int, participant_label: str, *, event_name: str):
-    """Crée un événement planifié. Ex: !create_event_plan @Role 2h #salon 25/12/2025 21h00 10 joueurs Événement de Noël"""
+    """Crée un événement planifié. Ex: !create_event_plan @Role #salon 2h 25/12/2025 21h00 10 joueurs Événement de Noël"""
     await _create_event_handler(ctx, role=role, channel=channel, duration=duration, start_date=start_date, start_time=start_time, max_participants=max_participants, participant_label=participant_label, event_name=event_name, is_contest=False)
 
 @bot.command(name='create_contest')
@@ -468,9 +483,9 @@ async def on_ready():
 async def on_command_error(ctx, error):
     """Gère les erreurs de commande."""
     if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"Il manque un argument pour cette commande. Utilisation correcte : `{ctx.command.usage}`", delete_after=60)
+        await ctx.send(f"Il manque un argument pour cette commande. Utilisation correcte dans le manuel `!helpoxel`.", delete_after=60)
     elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"Argument invalide. Veuillez vérifier le format de vos arguments.", delete_after=60)
+        await ctx.send(f"Argument invalide. Veuillez vérifier le format de vos arguments dans le manuel `!helpoxel`.", delete_after=60)
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send("Vous n'avez pas les permissions nécessaires pour exécuter cette commande (Gérer les rôles).", delete_after=60)
     elif isinstance(error, commands.CommandNotFound):
@@ -479,7 +494,7 @@ async def on_command_error(ctx, error):
         print(f"Erreur de commande : {error}")
         await ctx.send(f"Une erreur inattendue s'est produite : `{error}`", delete_after=60)
 
-@bot.command(name='helpoxel', usage='poxel')
+@bot.command(name='helpoxel')
 async def help_command(ctx):
     """Affiche le manuel d'aide de Poxel."""
     embed = create_retro_embed("🕹️ MANUEL DE POXEL")
@@ -488,19 +503,19 @@ async def help_command(ctx):
     commands_info = {
         "create_event": {
             "description": "Crée un événement immédiat.",
-            "usage": "`!create_event @rôle #salon durée max_participants étiquette nom_de_l'événement`"
+            "usage": "`!create_event @rôle #salon durée(ex: 1h30m) max_participants nom_étiquette nom_de_l'événement`"
         },
         "create_event_plan": {
             "description": "Crée un événement planifié.",
-            "usage": "`!create_event_plan @rôle #salon durée date(JJ/MM/AAAA) heure(HHhMM) max_participants étiquette nom_de_l'événement`"
+            "usage": "`!create_event_plan @rôle #salon durée(ex: 1h30m) date(JJ/MM/AAAA) heure(HHhMM) max_participants nom_étiquette nom_de_l'événement`"
         },
         "create_contest": {
             "description": "Crée un concours immédiat.",
-            "usage": "`!create_contest @rôle #salon nb_gagnants durée max_participants étiquette nom_de_l'événement`"
+            "usage": "`!create_contest @rôle #salon nb_gagnants durée(ex: 1h30m) max_participants nom_étiquette nom_de_l'événement`"
         },
         "create_contest_plan": {
             "description": "Crée un concours planifié.",
-            "usage": "`!create_contest_plan @rôle #salon nb_gagnants durée date(JJ/MM/AAAA) heure(HHhMM) max_participants étiquette nom_de_l'événement`"
+            "usage": "`!create_contest_plan @rôle #salon nb_gagnants durée(ex: 1h30m) date(JJ/MM/AAAA) heure(HHhMM) max_participants nom_étiquette nom_de_l'événement`"
         },
         "end_event": {
             "description": "Termine un événement en cours manuellement.",
