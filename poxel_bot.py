@@ -1,446 +1,528 @@
-# coding=utf-8
 import discord
-from discord.ext import commands
-import asyncio
+from discord.ext import commands, tasks
+from discord.ui import View, Button
 from datetime import datetime, timedelta
-import json
+import asyncio
 import os
+import random
+import re
+from dotenv import load_dotenv
 
-# --- Configuration du bot ---
+# Import des bibliothèques Firebase
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+# Charger les variables d'environnement depuis le fichier .env
+load_dotenv()
+BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+
+# --- Configuration Firebase ---
+# Le fichier 'serviceAccountKey.json' doit être dans le même dossier que ce script.
+try:
+    # On initialise la connexion à Firebase en utilisant le fichier de clé.
+    cred_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY_PATH', 'serviceAccountKey.json')
+    cred = credentials.Certificate(cred_path)
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("Firebase Admin SDK initialisé avec succès.")
+except Exception as e:
+    print(f"Erreur lors de l'initialisation de Firebase Admin SDK: {e}")
+    print("Assure-toi que le chemin 'FIREBASE_SERVICE_ACCOUNT_KEY_PATH' est correct et que le fichier de clé est présent.")
+    exit()
+
+# Définir le préfixe de commande et les intents nécessaires
 intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
+intents.message_content = True  # Nécessaire pour lire les commandes
+intents.guilds = True
+intents.members = True          # Nécessaire pour gérer les rôles des membres
 intents.reactions = True
 
+# Initialiser le bot
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- Variables globales pour le stockage en mémoire ---
-events_en_cours = {}
-messages_a_supprimer = []
-TOKEN = os.getenv('DISCORD_TOKEN') # Utilise une variable d'environnement pour le token
+# --- Fonctions Utilitaires ---
 
-# --- Fonctions utilitaires ---
+def parse_duration(duration_str: str) -> int:
+    """
+    Parse une chaîne de durée (ex: "2h", "30m") en secondes.
+    """
+    total_seconds = 0
+    matches = re.findall(r'(\d+)([hms])', duration_str.lower())
 
-def creer_embed(titre, description, couleur=0x009EFF, champs=None, image_url=None):
-    """
-    Crée et retourne un embed avec un style rétro-futuriste.
-    """
+    if not matches:
+        raise ValueError("Format de durée invalide. Utilisez '2h', '30m' ou une combinaison.")
+
+    for value, unit in matches:
+        value = int(value)
+        if unit == 'h':
+            total_seconds += value * 3600
+        elif unit == 'm':
+            total_seconds += value * 60
+        elif unit == 's':
+            total_seconds += value
+    return total_seconds
+
+NEON_BLUE = 0x009EFF
+
+def create_retro_embed(title, description="", color=NEON_BLUE):
+    """Crée un embed avec un style rétro."""
     embed = discord.Embed(
-        title=f"👾 💾 {titre} 💾 👾",
+        title=f"👾 {title.upper()} 👾",
         description=description,
-        color=couleur,
+        color=color
     )
-    embed.set_author(name="Poxel Bot 🤖", icon_url="https://i.imgur.com/2U5yV1t.png")
-    embed.set_footer(text="Système d'Event par Poxel - Version 1.0", icon_url="https://i.imgur.com/2U5yV1t.png")
-    if champs:
-        for nom, valeur, inline in champs:
-            embed.add_field(name=nom, value=valeur, inline=inline)
-    if image_url:
-        embed.set_image(url=image_url)
+    embed.set_author(name="Poxel OS", icon_url="https://placehold.co/64x64/009eff/ffffff?text=P")
+    embed.set_footer(text="Système d'événements Poxel - Mode Rétro �")
     return embed
 
-async def supprimer_messages_apres_delai():
-    """
-    Tâche en arrière-plan pour supprimer les messages de commandes.
-    """
-    while True:
-        await asyncio.sleep(60)
-        messages_a_supprimer_copie = messages_a_supprimer[:]
-        for message in messages_a_supprimer_copie:
-            try:
-                await message.delete()
-            except discord.NotFound:
-                pass
-            finally:
-                if message in messages_a_supprimer:
-                    messages_a_supprimer.remove(message)
+# --- Classes de vues et de boutons pour l'interaction utilisateur ---
 
-# --- Vues et composants d'interface utilisateur (boutons) ---
-
-class CreateEventView(discord.ui.View):
-    """
-    Vue contenant les boutons pour rejoindre et quitter un événement.
-    """
-    def __init__(self, bot, event_name, role_id, channel_id, participant_nom, embed_message_id, event_duree):
-        super().__init__(timeout=event_duree * 60)
-        self.bot = bot
-        self.event_name = event_name
-        self.role_id = role_id
-        self.channel_id = channel_id
-        self.participant_nom = participant_nom
-        self.embed_message_id = embed_message_id
-
-    async def on_timeout(self):
-        """
-        Fonction appelée lorsque la vue expire.
-        """
-        self.stop()
-        # Le reste de la logique de fin d'événement est géré par la fonction `finir_event`.
-
-    @discord.ui.button(label="Rejoindre 🎮", style=discord.ButtonStyle.green, custom_id="join_button")
-    async def join_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """
-        Gère le clic sur le bouton "Rejoindre".
-        """
-        event = events_en_cours.get(self.event_name)
-        if not event:
-            await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True, delete_after=30)
-            return
-
-        if interaction.user.id in event['participants']:
-            await interaction.response.send_message("Tu es déjà inscrit à cet événement !", ephemeral=True, delete_after=30)
-            return
-
-        modal = discord.ui.Modal(title=f"Pseudo pour l'événement '{self.event_name}'")
-        modal.add_item(discord.ui.InputText(label="Pseudo en jeu (facultatif)", style=discord.InputTextStyle.short))
+class EventButtons(View):
+    def __init__(self, event_firestore_id):
+        super().__init__(timeout=None)
+        self.event_firestore_id = event_firestore_id
         
-        async def on_submit_modal(interaction_modal: discord.Interaction):
-            pseudo = interaction_modal.data.get('components', [{}])[0].get('components', [{}])[0].get('value', '').strip()
-            
-            role = interaction.guild.get_role(self.role_id)
-            if role:
-                await interaction_modal.user.add_roles(role)
-            
-            event['participants'][interaction_modal.user.id] = {
-                'discord_id': interaction_modal.user.id,
-                'discord_pseudo': interaction_modal.user.name,
-                'pseudo_jeu': pseudo if pseudo else None,
-            }
-            
-            embed_message = await interaction_modal.channel.fetch_message(self.embed_message_id)
-            await mettre_a_jour_embed_event(embed_message, self.event_name)
-            
-            welcome_message = f"Bienvenue dans la partie {interaction_modal.user.mention}"
-            if pseudo:
-                welcome_message += f" ({pseudo})"
-            await interaction_modal.response.send_message(welcome_message, ephemeral=True, delete_after=30)
-
-        modal.on_submit = on_submit_modal
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="Quitter 🚪", style=discord.ButtonStyle.red, custom_id="quit_button")
-    async def quit_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """
-        Gère le clic sur le bouton "Quitter".
-        """
-        event = events_en_cours.get(self.event_name)
-        if not event:
-            await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True, delete_after=30)
-            return
-
-        if interaction.user.id not in event['participants']:
-            await interaction.response.send_message("Tu n'es pas inscrit à cet événement.", ephemeral=True, delete_after=30)
-            return
-
-        role = interaction.guild.get_role(self.role_id)
-        if role:
-            await interaction.user.remove_roles(role)
-        
-        del event['participants'][interaction.user.id]
-        
-        embed_message = await interaction.channel.fetch_message(self.embed_message_id)
-        await mettre_a_jour_embed_event(embed_message, self.event_name)
-
-        await interaction.response.send_message(f"{interaction.user.mention} a quitté l'événement '{self.event_name}'.", ephemeral=True, delete_after=30)
-
-
-async def mettre_a_jour_embed_event(message, event_name):
-    """
-    Met à jour l'embed de l'événement avec la liste des participants en temps réel.
-    """
-    event = events_en_cours.get(event_name)
-    if not event:
-        return
-
-    participants_str = ""
-    for participant_info in event['participants'].values():
-        pseudo_jeu = participant_info['pseudo_jeu'] if participant_info['pseudo_jeu'] else "N/A"
-        participants_str += f"> `👾` {participant_info['discord_pseudo']} (pseudo: {pseudo_jeu})\n"
-    
-    participants_str = participants_str if participants_str else "Aucun participant pour l'instant."
-
-    embed = creer_embed(
-        f"new event: {event_name}",
-        f"Durée: {event['duree']} minutes\n"
-        f"Point de ralliement: <#{event['salon_attente_id']}>\n"
-        f"Il y a actuellement `{len(event['participants'])}` {event['participant_nom']}(s) inscrit(s).\n\n"
-        f"Le rôle <@&{event['role_id']}> vous sera attribué une fois inscrit. Veuillez rejoindre le point de ralliement et patienter d’être déplacé dans le salon.",
-        champs=[
-            (f"Liste des {event['participant_nom']}(s)", participants_str, False)
-        ]
-    )
-
-    await message.edit(embed=embed)
-
-
-async def creer_event_maintenant(ctx, role_name, channel_name, duree, event_name, participant_nom):
-    """
-    Fonction principale pour créer un événement immédiat.
-    """
-    if event_name in events_en_cours:
-        await ctx.send(f"❌ L'événement '{event_name}' existe déjà.", delete_after=60)
-        return
-
-    try:
-        role = await ctx.guild.create_role(name=role_name, color=0x009EFF)
-        salon = await ctx.guild.create_text_channel(
-            channel_name, 
-            overwrites={
-                ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                role: discord.PermissionOverwrite(read_messages=True),
-                ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            }
+        # Ajout du bouton "Participer"
+        join_button = Button(
+            label="JOIN GAME", 
+            style=discord.ButtonStyle.green, 
+            emoji="🎮", 
+            custom_id=f"join_event_{self.event_firestore_id}"
         )
-    except discord.Forbidden:
-        await ctx.send("❌ Je n'ai pas les permissions nécessaires pour créer des rôles/salons.", delete_after=60)
-        return
+        join_button.callback = self.handle_join
+        self.add_item(join_button)
 
-    embed_message = await ctx.send("@everyone")
-    view = CreateEventView(bot, event_name, role.id, salon.id, participant_nom, embed_message.id, duree)
-    
-    events_en_cours[event_name] = {
-        'type': 'immédiat',
-        'nom': event_name,
-        'role_id': role.id,
-        'salon_attente_id': salon.id,
-        'duree': duree,
-        'participant_nom': participant_nom,
-        'participants': {},
-        'embed_message_id': embed_message.id
-    }
-    
-    await mettre_a_jour_embed_event(embed_message, event_name)
-    await embed_message.edit(view=view)
+        # Ajout du bouton "Quitter"
+        quit_button = Button(
+            label="QUIT", 
+            style=discord.ButtonStyle.red, 
+            emoji="🚪", 
+            custom_id=f"quit_event_{self.event_firestore_id}"
+        )
+        quit_button.callback = self.handle_quit
+        self.add_item(quit_button)
 
-    bot.loop.create_task(finir_event_apres_delai(event_name, duree * 60))
+    async def handle_join(self, interaction: discord.Interaction):
+        await self.handle_participation(interaction, 'join')
 
-    await ctx.send(f"✅ L'événement '{event_name}' a été créé ! Il commencera dans {duree} minutes.")
+    async def handle_quit(self, interaction: discord.Interaction):
+        await self.handle_participation(interaction, 'quit')
 
+    async def handle_participation(self, interaction: discord.Interaction, action: str):
+        """Gère les clics sur les boutons 'Participer' et 'Quitter'."""
+        user = interaction.user
+        event_ref = db.collection('events').document(self.event_firestore_id)
+        event_doc = event_ref.get()
 
-async def finir_event(event_name, guild):
-    """
-    Fonction pour gérer la fin d'un événement.
-    """
-    if event_name not in events_en_cours:
-        return
-    
-    event = events_en_cours[event_name]
-    embed_message_id = event.get('embed_message_id')
-    
-    try:
-        role = guild.get_role(event['role_id'])
-        salon = guild.get_channel(event['salon_attente_id'])
+        if not event_doc.exists:
+            await interaction.response.send_message("Cet événement n'existe plus ou a été terminé.", ephemeral=True)
+            return
 
-        for participant_id in event['participants']:
-            member = guild.get_member(participant_id)
-            if member and role:
-                await member.remove_roles(role)
+        event_data = event_doc.to_dict()
+        event_name = event_data.get('name', 'Nom inconnu')
+        guild = interaction.guild
+        role = guild.get_role(event_data['role_id'])
 
-        if salon:
-            await salon.delete()
-        if role:
-            await role.delete()
+        if not role:
+            await interaction.response.send_message("Le rôle associé à cet événement n'a pas été trouvé.", ephemeral=True)
+            return
 
-        if guild.system_channel:
-            await guild.system_channel.send(f"@everyone 🕰️ L'événement '{event_name}' est maintenant terminé !")
+        current_participants_list = event_data.get('participants', [])
+        max_participants = event_data.get('max_participants')
+        participant_label = event_data.get('participant_label', 'participants')
 
-        if embed_message_id:
+        if action == 'join':
+            if user.id in current_participants_list:
+                await interaction.response.send_message("Vous participez déjà à cet événement.", ephemeral=True)
+                return
+            if max_participants and len(current_participants_list) >= max_participants:
+                await interaction.response.send_message("Désolé, cet événement a atteint sa capacité maximale.", ephemeral=True)
+                return
+
             try:
-                message = await guild.system_channel.fetch_message(embed_message_id)
-                await message.delete()
-            except (discord.NotFound, discord.HTTPException):
-                pass
-    
-    except discord.Forbidden:
-        if guild.system_channel:
-            await guild.system_channel.send("❌ Je n'ai pas les permissions pour nettoyer les rôles et salons.")
+                await user.add_roles(role, reason=f"Participation à l'événement {event_name}")
+                event_ref.update({'participants': firestore.ArrayUnion([user.id])})
+                await interaction.response.send_message(f"Vous avez rejoint l'événement **'{event_name}'** !", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message("Je n'ai pas les permissions nécessaires pour vous donner ce rôle.", ephemeral=True)
+                return
+            except Exception as e:
+                await interaction.response.send_message(f"Une erreur est survenue lors de votre inscription : `{e}`", ephemeral=True)
+                return
 
-    del events_en_cours[event_name]
-    
+        elif action == 'quit':
+            if user.id not in current_participants_list:
+                await interaction.response.send_message("Vous ne participez pas à cet événement.", ephemeral=True)
+                return
 
-async def finir_event_apres_delai(event_name, delai_secondes):
+            try:
+                await user.remove_roles(role, reason=f"Quitte l'événement {event_name}")
+                event_ref.update({'participants': firestore.ArrayRemove([user.id])})
+                await interaction.response.send_message(f"Vous avez quitté l'événement **'{event_name}'**.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message("Je n'ai pas les permissions nécessaires pour vous retirer ce rôle.", ephemeral=True)
+                return
+            except Exception as e:
+                await interaction.response.send_message(f"Une erreur est survenue lors de votre désinscription : `{e}`", ephemeral=True)
+                return
+        
+        # Mettre à jour l'embed après l'interaction
+        updated_event_doc = event_ref.get()
+        if updated_event_doc.exists:
+            updated_event_data = updated_event_doc.to_dict()
+            updated_participants_count = len(updated_event_data.get('participants', []))
+            
+            try:
+                original_message = interaction.message
+                if original_message:
+                    embed = original_message.embeds[0]
+                    embed.set_field_at(
+                        index=3, # Index du champ "Capacité" ou "Participants"
+                        name="<:retro_user:123456789012345678> Participants",
+                        value=f"**{updated_participants_count}** / **{max_participants}** {participant_label}",
+                        inline=False
+                    )
+                    await original_message.edit(embed=embed)
+            except Exception as e:
+                print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
+
+
+# --- Tâche de gestion des événements ---
+
+async def _end_event(event_doc_id: str):
     """
-    Attend un certain temps puis appelle la fonction de fin d'événement.
+    Fonction interne pour terminer un événement, retirer les rôles et nettoyer.
+    Prend l'ID du document Firestore.
     """
-    await asyncio.sleep(delai_secondes)
-    guild = bot.guilds[0]
-    await finir_event(event_name, guild)
+    event_ref = db.collection('events').document(event_doc_id)
+    event_doc = event_ref.get()
+
+    if not event_doc.exists:
+        print(f"Tentative de terminer un événement non existant dans Firestore : {event_doc_id}")
+        return
+
+    event_data = event_doc.to_dict()
+    event_name = event_data.get('name', 'Nom inconnu')
+    guild = bot.get_guild(event_data['guild_id'])
+    
+    if not guild:
+        print(f"Guilde non trouvée pour l'événement {event_name} (ID: {event_doc_id})")
+        event_ref.delete()
+        return
+
+    role = guild.get_role(event_data['role_id'])
+    channel = guild.get_channel(event_data['channel_id'])
+
+    # Gérer le tirage au sort si c'est un concours
+    if event_data.get('is_contest', False):
+        participants_list = list(event_data.get('participants', []))
+        winner_count = event_data.get('winner_count', 1)
+        
+        if len(participants_list) >= winner_count:
+            winners_id = random.sample(participants_list, winner_count)
+            winners_mention = [f"<@{user_id}>" for user_id in winners_id]
+            winners_str = ", ".join(winners_mention)
+
+            winner_embed = create_retro_embed(f"🎉 RÉSULTATS DU CONCOURS : {event_name} 🎉")
+            winner_embed.description = f"Félicitations aux gagnants ! Voici les heureux élus du tirage au sort :\n\n{winners_str}"
+            
+            if channel:
+                await channel.send(f"@everyone CONCOURS TERMINÉ : **{event_name}**", embed=winner_embed)
+        else:
+            if channel:
+                await channel.send(f"@everyone 🛑 Le concours '{event_name}' a été annulé car il n'y a pas assez de participants.")
+
+    # Retirer les rôles des participants
+    for user_id in event_data.get('participants', []):
+        member = guild.get_member(user_id)
+        if member and role:
+            try:
+                await member.remove_roles(role, reason=f"Fin de l'événement {event_name}")
+            except discord.Forbidden:
+                print(f"Permissions insuffisantes pour retirer le rôle {role.name} à {member.display_name}")
+            except Exception as e:
+                print(f"Erreur lors du retrait du rôle à {member.display_name}: {e}")
+    
+    # Mettre à jour le message de l'événement
+    try:
+        event_message = await channel.fetch_message(event_data['message_id'])
+        if event_message:
+            embed = event_message.embeds[0]
+            embed.color = 0x8B0000  # Rouge foncé pour indiquer la fin
+            embed.description = f"**Cet événement est terminé.**"
+            # Retirer tous les champs sauf le nom
+            embed.clear_fields()
+            embed.add_field(name="<:retro_user:123456789012345678> Participants", value=f"{len(event_data.get('participants', []))} {event_data.get('participant_label', 'participants')}", inline=False)
+            await event_message.edit(embed=embed, view=None) # view=None pour retirer les boutons
+    except discord.NotFound:
+        print(f"Message de l'événement {event_name} non trouvé sur Discord.")
+    except Exception as e:
+        print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
+
+    # Supprimer l'événement de Firestore
+    event_ref.delete()
+    print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
+
+
+@tasks.loop(minutes=1)
+async def check_expired_events():
+    """Tâche en arrière-plan pour vérifier et terminer les événements expirés."""
+    print("Vérification des événements expirés...")
+    events_ref = db.collection('events')
+    now = datetime.now()
+    for doc in events_ref.stream():
+        event_data = doc.to_dict()
+        event_end_time = event_data.get('end_time')
+        
+        if event_end_time and isinstance(event_end_time, firestore.firestore.Timestamp):
+            if event_end_time.astimezone() < now.astimezone():
+                print(f"Événement '{event_data.get('name', doc.id)}' expiré. Fin de l'événement...")
+                await _end_event(doc.id)
 
 
 # --- Commandes du bot ---
 
-def has_manage_roles():
-    """
-    Décorateur de vérification de permissions.
-    """
-    async def predicate(ctx):
-        return ctx.author.guild_permissions.manage_roles
-    return commands.check(predicate)
+async def _create_event_handler(ctx, role: discord.Role, duration: str, start_time: str, channel: discord.TextChannel, max_participants: int, participant_label: str, event_name: str, is_contest: bool, winner_count: int = 1, start_date: str = None):
+    """Fonction interne pour gérer la création d'un événement ou d'un concours."""
+    
+    # Vérifier si l'événement existe déjà dans Firestore
+    events_ref = db.collection('events')
+    existing_event = events_ref.where('name', '==', event_name).get()
+    if existing_event:
+        await ctx.send(f"⚠️ Un événement nommé '{event_name}' existe déjà.", delete_after=60)
+        await asyncio.sleep(60)
+        await ctx.message.delete()
+        return
 
+    try:
+        duration_seconds = parse_duration(duration)
+        if duration_seconds <= 0:
+            raise ValueError("La durée doit être positive.")
 
-@bot.event
-async def on_ready():
-    """
-    Indique que le bot est prêt et démarre la tâche de suppression de messages.
-    """
-    print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
-    bot.loop.create_task(supprimer_messages_apres_delai())
+        now = datetime.now()
+        
+        if start_date:
+            start_datetime = datetime.strptime(f"{start_date} {start_time}", "%d/%m/%Y %Hh%M")
+        else:
+            start_hour, start_minute = map(int, start_time.split('h'))
+            start_datetime = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+            if start_datetime < now:
+                start_datetime += timedelta(days=1)
+        
+        end_datetime = start_datetime + timedelta(seconds=duration_seconds)
+
+        if start_datetime < now:
+            raise ValueError("La date et l'heure de début doivent être dans le futur.")
+
+    except (ValueError, IndexError, TypeError) as e:
+        await ctx.send(f"❌ Erreur de format des arguments. {e}\nUtilisation correcte dans `!help_create_event`", delete_after=60)
+        await asyncio.sleep(60)
+        await ctx.message.delete()
+        return
+
+    # Créer un message temporaire pour obtenir l'ID du message
+    temp_message = await ctx.send("Création de l'événement en cours...")
+
+    # Sauvegarder l'événement dans Firestore
+    event_data_firestore = {
+        'name': event_name,
+        'role_id': role.id,
+        'channel_id': channel.id,
+        'end_time': end_datetime,
+        'start_time': start_datetime,
+        'max_participants': max_participants,
+        'participant_label': participant_label,
+        'participants': [],
+        'message_id': temp_message.id,
+        'guild_id': ctx.guild.id,
+        'is_contest': is_contest,
+        'winner_count': winner_count
+    }
+    doc_ref = db.collection('events').document()
+    doc_ref.set(event_data_firestore)
+    event_firestore_id = doc_ref.id
+
+    # Création des boutons
+    view = EventButtons(event_firestore_id)
+
+    # Création de l'embed
+    if is_contest:
+        embed_title = f"🏆 NOUVEAU CONCOURS : {event_name}"
+        announcement_text = f"@everyone Un nouveau concours a été créé : **{event_name}** ! Bonne chance à tous !"
+    else:
+        embed_title = f"NEW EVENT : {event_name}"
+        announcement_text = f"@everyone Un nouvel événement a été créé : **{event_name}** !"
+    
+    embed = create_retro_embed(embed_title)
+    embed.description = (
+        f"**Rôle attribué :** {role.mention}\n"
+        f"**Accès au salon :** {channel.mention}\n"
+    )
+    if is_contest:
+        embed.add_field(name="<:retro_prize:123456789012345678> Gagnants", value=f"**{winner_count}** {participant_label}(s) seront tirés au sort !", inline=False)
+    
+    embed.add_field(name="<:retro_time:123456789012345678> Durée", value=f"Commence à <t:{int(start_datetime.timestamp())}:f> (se termine <t:{int(end_datetime.timestamp())}:R>)", inline=False)
+    embed.add_field(name="<:retro_user:123456789012345678> Participants", value=f"**0** / **{max_participants}** {participant_label}", inline=False)
+
+    await temp_message.edit(content=announcement_text, embed=embed, view=view)
+    await ctx.send(f"L'événement **'{event_name}'** a été créé avec succès.", delete_after=60)
 
 
 @bot.command(name='create_event')
-@has_manage_roles()
-async def create_event(ctx, event_name, participant_nom, role_name, channel_name, duree: int):
-    """
-    Crée un événement immédiat.
-    Exemple: !create_event "Chasse au dragon" joueur "Chasseurs" "salle-des-chasseurs" 60
-    """
-    await ctx.message.delete(delay=60)
-    await creer_event_maintenant(ctx, role_name, channel_name, duree, event_name, participant_nom)
-
+@commands.has_permissions(manage_roles=True)
+async def create_event(ctx, role: discord.Role, channel: discord.TextChannel, duration: str, max_participants: int, participant_label: str, *, event_name: str):
+    """Crée un événement immédiat. Ex: !create_event @Joueur #salon-jeu 1h30m 4 joueurs Partie de Donjons"""
+    await _create_event_handler(ctx, role=role, channel=channel, duration=duration, max_participants=max_participants, participant_label=participant_label, event_name=event_name, is_contest=False)
 
 @bot.command(name='create_event_plan')
-@has_manage_roles()
-async def create_event_plan(ctx, event_name, participant_nom, role_name, channel_name, duree: int, date_str, heure_str):
-    """
-    Planifie un événement à une date et heure précises.
-    Exemple: !create_event_plan "Tournoi de foot" footballeur "Footballeurs" "stade-de-foot" 120 2025-08-08 20:00
-    """
-    await ctx.message.delete(delay=60)
-    
-    try:
-        date_planifiee = datetime.strptime(f"{date_str} {heure_str}", "%Y-%m-%d %H:%M")
-        maintenant = datetime.now()
-        delai_secondes = (date_planifiee - maintenant).total_seconds()
-        
-        if delai_secondes < 0:
-            await ctx.send("❌ La date et l'heure de planification sont dans le passé.", delete_after=60)
-            return
+@commands.has_permissions(manage_roles=True)
+async def create_event_plan(ctx, role: discord.Role, channel: discord.TextChannel, duration: str, start_date: str, start_time: str, max_participants: int, participant_label: str, *, event_name: str):
+    """Crée un événement planifié. Ex: !create_event_plan @Role 2h #salon 25/12/2025 21h00 10 joueurs Événement de Noël"""
+    await _create_event_handler(ctx, role=role, channel=channel, duration=duration, start_date=start_date, start_time=start_time, max_participants=max_participants, participant_label=participant_label, event_name=event_name, is_contest=False)
 
-        await ctx.send(f"✅ L'événement '{event_name}' est planifié pour le {date_planifiee.strftime('%d/%m/%Y à %H:%M')}.", delete_after=60)
+@bot.command(name='create_contest')
+@commands.has_permissions(manage_roles=True)
+async def create_contest(ctx, role: discord.Role, channel: discord.TextChannel, winner_count: int, duration: str, max_participants: int, participant_label: str, *, event_name: str):
+    """Crée un concours immédiat. Ex: !create_contest @Concours #salon-jeu 3 1h 10 participants Le Grand Tournoi"""
+    if winner_count < 1:
+        await ctx.send("Le nombre de gagnants doit être d'au moins 1.", delete_after=60)
+        return
+    await _create_event_handler(ctx, role=role, channel=channel, duration=duration, max_participants=max_participants, participant_label=participant_label, event_name=event_name, is_contest=True, winner_count=winner_count)
 
-        await asyncio.sleep(delai_secondes)
-        
-        await creer_event_maintenant(ctx, role_name, channel_name, duree, event_name, participant_nom)
-    
-    except ValueError:
-        await ctx.send("❌ Format de date/heure incorrect. Utilisez YYYY-MM-DD HH:MM", delete_after=60)
+@bot.command(name='create_contest_plan')
+@commands.has_permissions(manage_roles=True)
+async def create_contest_plan(ctx, role: discord.Role, channel: discord.TextChannel, winner_count: int, duration: str, start_date: str, start_time: str, max_participants: int, participant_label: str, *, event_name: str):
+    """Crée un concours planifié. Ex: !create_contest_plan @Concours #salon-jeu 3 2h 25/12/2025 21h00 10 participants Le Concours de Noël"""
+    if winner_count < 1:
+        await ctx.send("Le nombre de gagnants doit être d'au moins 1.", delete_after=60)
+        return
+    await _create_event_handler(ctx, role=role, channel=channel, duration=duration, start_date=start_date, start_time=start_time, max_participants=max_participants, participant_label=participant_label, event_name=event_name, is_contest=True, winner_count=winner_count)
 
 
 @bot.command(name='end_event')
-@has_manage_roles()
-async def end_event(ctx, event_name):
-    """
-    Termine manuellement un événement immédiat.
-    Exemple: !end_event "Chasse au dragon"
-    """
-    await ctx.message.delete(delay=60)
-    if event_name in events_en_cours and events_en_cours[event_name]['type'] == 'immédiat':
-        await ctx.send(f"📢 L'événement '{event_name}' va être terminé manuellement.", delete_after=60)
-        await finir_event(event_name, ctx.guild)
-    else:
-        await ctx.send(f"❌ L'événement '{event_name}' n'est pas un événement immédiat actif.", delete_after=60)
+@commands.has_permissions(manage_roles=True)
+async def end_event_command(ctx, *, event_name: str):
+    """Termine manuellement un événement et retire les rôles. Ex: !end_event Ma Super Partie"""
+    events_ref = db.collection('events')
+    existing_event_docs = events_ref.where('name', '==', event_name).get()
 
+    if not existing_event_docs:
+        await ctx.send(f"L'événement **'{event_name}'** n'existe pas ou est déjà terminé.", delete_after=60)
+        return
 
-@bot.command(name='end_event_plan')
-@has_manage_roles()
-async def end_event_plan(ctx, event_name):
-    """
-    Termine manuellement un événement planifié.
-    Exemple: !end_event_plan "Tournoi de foot"
-    """
-    await ctx.message.delete(delay=60)
-    if event_name in events_en_cours and events_en_cours[event_name]['type'] == 'planifié':
-        await ctx.send(f"📢 L'événement planifié '{event_name}' va être terminé manuellement.", delete_after=60)
-        await finir_event(event_name, ctx.guild)
-    else:
-        await ctx.send(f"❌ L'événement '{event_name}' n'est pas un événement planifié actif.", delete_after=60)
+    event_doc_id = existing_event_docs[0].id
+    
+    await ctx.send(f"L'événement **'{event_name}'** est en cours de fermeture...", delete_after=60)
+    await _end_event(event_doc_id)
+    await ctx.send(f"L'événement **'{event_name}'** a été terminé manuellement.", delete_after=60)
 
 
 @bot.command(name='list_events')
 async def list_events(ctx):
-    """
-    Affiche tous les événements actifs.
-    """
-    await ctx.message.delete(delay=60)
-    if not events_en_cours:
+    """Affiche tous les événements actifs avec leurs détails. Ex: !list_events"""
+    events_ref = db.collection('events')
+    active_events_docs = events_ref.stream()
+
+    events_list = []
+    for doc in active_events_docs:
+        events_list.append(doc.to_dict())
+
+    if not events_list:
         await ctx.send("Aucun événement actif pour le moment.", delete_after=60)
         return
 
-    description = "Voici la liste des événements actuellement en cours ou planifiés :\n\n"
-    for event_name, event_data in events_en_cours.items():
-        participants = len(event_data['participants'])
-        role = ctx.guild.get_role(event_data['role_id'])
-        salon = ctx.guild.get_channel(event_data['salon_attente_id'])
+    embed = create_retro_embed("Liste des événements actifs")
+
+    for data in events_list:
+        guild = bot.get_guild(data['guild_id'])
+        role = guild.get_role(data['role_id']) if guild else None
+        channel = guild.get_channel(data['channel_id']) if guild else None
         
-        description += (
-            f"**`{event_name}`**\n"
-            f"  > **Type** : {event_data['type']}\n"
-            f"  > **Participants** : {participants} {event_data['participant_nom']}(s)\n"
-            f"  > **Rôle** : {role.mention if role else 'Non trouvé'}\n"
-            f"  > **Salon** : {salon.mention if salon else 'Non trouvé'}\n"
+        participants_count = len(data.get('participants', []))
+        event_type = "Concours" if data.get('is_contest') else "Événement"
+        
+        embed.add_field(
+            name=f"🎮 {data['name']}",
+            value=(
+                f"**Type :** {event_type}\n"
+                f"**Rôle :** {role.mention if role else 'Introuvable'}\n"
+                f"**Salon :** {channel.mention if channel else 'Introuvable'}\n"
+                f"**Participants :** {participants_count} / {data['max_participants']} {data['participant_label']}\n"
+                f"**Fin :** <t:{int(data['end_time'].timestamp())}:R>"
+            ),
+            inline=False
         )
-    
-    embed = creer_embed("Events en cours", description)
-    await ctx.send(embed=embed, delete_after=60)
 
-# --- Système d'aide personnalisé ---
-
-@bot.group(name='helpoxel', invoke_without_command=True)
-async def helpoxel(ctx):
-    """
-    Affiche la liste des commandes disponibles.
-    """
-    await ctx.message.delete(delay=60)
-    description = (
-        "🤖 **Bienvenue dans le manuel de Poxel !** 🤖\n"
-        "Utilise `!helpoxel <commande>` pour plus de détails sur une commande spécifique.\n\n"
-        "**Commandes d'événement :**\n"
-        " - `!create_event` : Crée un événement qui démarre immédiatement.\n"
-        " - `!create_event_plan` : Planifie un événement à une date et heure précises.\n"
-        " - `!end_event` : Termine manuellement un événement immédiat.\n"
-        " - `!end_event_plan` : Termine manuellement un événement planifié.\n"
-        " - `!list_events` : Affiche les événements actifs.\n"
-    )
-    embed = creer_embed("Manuel de Poxel", description)
     await ctx.send(embed=embed, delete_after=300)
 
-@helpoxel.command(name='create_event')
-async def help_create_event(ctx):
-    """
-    Aide pour la commande create_event.
-    """
-    await ctx.message.delete(delay=60)
-    embed = creer_embed(
-        "Manuel de Poxel : !create_event",
-        "**Usage** : `!create_event <nom_event> <nom_participant> <nom_role> <nom_salon> <durée_en_min>`\n"
-        "**Exemple** : `!create_event \"Chasse au trésor\" chasseur \"Aventuriers\" \"chasse-au-tresor\" 60`\n\n"
-        "Crée un événement qui démarre immédiatement avec un rôle et un salon dédiés. Les participants rejoignent via un bouton et le rôle leur donne accès au salon. L'événement se termine automatiquement après la durée spécifiée."
-    )
-    await ctx.send(embed=embed, delete_after=300)
+# --- Événements du Bot ---
 
-@helpoxel.command(name='create_event_plan')
-async def help_create_event_plan(ctx):
-    """
-    Aide pour la commande create_event_plan.
-    """
-    await ctx.message.delete(delay=60)
-    embed = creer_embed(
-        "Manuel de Poxel : !create_event_plan",
-        "**Usage** : `!create_event_plan <nom_event> <nom_participant> <nom_role> <nom_salon> <durée_en_min> <YYYY-MM-DD> <HH:MM>`\n"
-        "**Exemple** : `!create_event_plan \"Tournoi de foot\" footballeur \"Footballeurs\" \"stade-de-foot\" 120 2025-08-08 20:00`\n\n"
-        "Planifie un événement à une date et heure précises. L'événement démarre automatiquement à l'heure prévue et se termine après la durée spécifiée."
-    )
-    await ctx.send(embed=embed, delete_after=300)
-
-
-# --- Démarrage du bot ---
 @bot.event
 async def on_ready():
-    """
-    Indique que le bot est prêt et démarre la tâche de suppression de messages.
-    """
+    """Se déclenche lorsque le bot est connecté à Discord."""
     print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
-    bot.loop.create_task(supprimer_messages_apres_delai())
+    print('Prêt à gérer les événements !')
+    check_expired_events.start()
 
-if __name__ == '__main__':
-    bot.run(TOKEN)
+@bot.event
+async def on_command_error(ctx, error):
+    """Gère les erreurs de commande."""
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"Il manque un argument pour cette commande. Utilisation correcte : `{ctx.command.usage}`", delete_after=60)
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(f"Argument invalide. Veuillez vérifier le format de vos arguments.", delete_after=60)
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("Vous n'avez pas les permissions nécessaires pour exécuter cette commande (Gérer les rôles).", delete_after=60)
+    elif isinstance(error, commands.CommandNotFound):
+        pass
+    else:
+        print(f"Erreur de commande : {error}")
+        await ctx.send(f"Une erreur inattendue s'est produite : `{error}`", delete_after=60)
+
+@bot.command(name='helpoxel', usage='poxel')
+async def help_command(ctx):
+    """Affiche le manuel d'aide de Poxel."""
+    embed = create_retro_embed("🕹️ MANUEL DE POXEL")
+    embed.description = "Je suis Poxel, votre assistant pour gérer les événements sur Discord. Voici comment m'utiliser :"
+
+    commands_info = {
+        "create_event": {
+            "description": "Crée un événement immédiat.",
+            "usage": "`!create_event @rôle #salon durée max_participants étiquette nom_de_l'événement`"
+        },
+        "create_event_plan": {
+            "description": "Crée un événement planifié.",
+            "usage": "`!create_event_plan @rôle #salon durée date(JJ/MM/AAAA) heure(HHhMM) max_participants étiquette nom_de_l'événement`"
+        },
+        "create_contest": {
+            "description": "Crée un concours immédiat.",
+            "usage": "`!create_contest @rôle #salon nb_gagnants durée max_participants étiquette nom_de_l'événement`"
+        },
+        "create_contest_plan": {
+            "description": "Crée un concours planifié.",
+            "usage": "`!create_contest_plan @rôle #salon nb_gagnants durée date(JJ/MM/AAAA) heure(HHhMM) max_participants étiquette nom_de_l'événement`"
+        },
+        "end_event": {
+            "description": "Termine un événement en cours manuellement.",
+            "usage": "`!end_event nom_de_l'événement`"
+        },
+        "list_events": {
+            "description": "Affiche tous les événements actifs avec leurs détails.",
+            "usage": "`!list_events`"
+        }
+    }
+
+    for command_name, info in commands_info.items():
+        embed.add_field(
+            name=f"**!{command_name}**",
+            value=f"{info['description']}\nUtilisation : {info['usage']}",
+            inline=False
+        )
+    
+    embed.set_footer(text="Poxel est là pour vous aider, waeky !")
+    await ctx.send(embed=embed, delete_after=180)
+
+
+# --- Démarrage du Bot ---
+bot.run(BOT_TOKEN)
+�
