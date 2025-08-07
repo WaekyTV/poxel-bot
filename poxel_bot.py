@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import pytz
 import json
 import tempfile
+import re
 
 # Importe les modules Firebase
 import firebase_admin
@@ -89,8 +90,24 @@ async def create_event(ctx, role_name, start_time_str, duration_str: str, waitin
 
     try:
         # Nettoie le nom du rôle et des salons des préfixes Discord
-        if role_name.startswith('@'):
-            role_name = role_name[1:]
+        # Gère les mentions de rôle (@rôle) et les noms de rôle
+        target_role = None
+        role_match = re.match(r'<@&(\d+)>', role_name) # Capture l'ID d'un rôle mentionné
+        if role_match:
+            role_id = int(role_match.group(1))
+            target_role = discord.utils.get(ctx.guild.roles, id=role_id)
+        else:
+            # Si ce n'est pas une mention, on recherche par nom (insensible à la casse)
+            target_role = discord.utils.get(ctx.guild.roles, name=role_name)
+        
+        # Affiche un message de débogage pour voir le nom de rôle recherché
+        print(f"Recherche du rôle avec la chaîne : '{role_name}'")
+
+        if not target_role:
+            await ctx.send(f"Le rôle '{role_name}' n'existe pas sur ce serveur. Assure-toi que le nom ou la mention est exact(e).")
+            return
+        
+        # Nettoie les noms des salons des préfixes Discord
         if waiting_room_channel_name.startswith('#'):
             waiting_room_channel_name = waiting_room_channel_name[1:]
         if event_channel_name.startswith('#'):
@@ -120,14 +137,10 @@ async def create_event(ctx, role_name, start_time_str, duration_str: str, waitin
             await ctx.send("Désolé, l'heure de début de l'événement ne peut pas être dans le passé. Utilise l'heure du jour.")
             return
 
-        # Trouve le rôle et les salons
-        target_role = discord.utils.get(ctx.guild.roles, name=role_name)
+        # Trouve les salons
         target_event_channel = discord.utils.get(ctx.guild.voice_channels, name=event_channel_name)
         target_waiting_room_channel = discord.utils.get(ctx.guild.voice_channels, name=waiting_room_channel_name)
 
-        if not target_role:
-            await ctx.send(f"Le rôle '{role_name}' n'existe pas sur ce serveur. Assure-toi que le nom est exact.")
-            return
         if not target_event_channel:
             await ctx.send(f"Le salon vocal '{event_channel_name}' n'existe pas sur ce serveur. Assure-toi que le nom est exact.")
             return
