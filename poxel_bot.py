@@ -1,3 +1,12 @@
+# -*- coding: utf-8 -*-
+# --- INSTRUCTIONS POUR RENDER ---
+# IMPORTANT : Pour que ce bot fonctionne sur Render, vous devez configurer
+# le service comme un "Background Worker", et non un "Web Service".
+# Un bot Discord n'écoute pas sur un port HTTP, ce qui cause les erreurs
+# de timeout.
+# Assurez-vous également que la ligne 'pytz' est bien présente dans
+# votre fichier 'requirements.txt'.
+
 import discord
 from discord.ext import commands, tasks
 from discord.ui import View, Button
@@ -9,6 +18,7 @@ import re
 import json
 from dotenv import load_dotenv
 import pytz # Import de la bibliothèque pour la gestion des fuseaux horaires
+from typing import Optional
 
 # Import des bibliothèques Firebase
 import firebase_admin
@@ -122,10 +132,14 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True) # Defer the response to avoid timeout
+        """
+        Gère la soumission du formulaire d'inscription.
+        """
+        await interaction.response.defer(ephemeral=True)
         alias = self.alias_input.value
         user = interaction.user
         event_ref = db.collection('events').document(self.event_firestore_id)
+        
         event_doc = await asyncio.to_thread(event_ref.get)
         
         if not event_doc.exists:
@@ -144,26 +158,22 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
 
         participants_list = event_data.get('participants', [])
         max_participants = event_data.get('max_participants')
-        participant_label = event_data.get('participant_label', 'participants')
-
+        
         # Vérifier si l'utilisateur est déjà inscrit
         is_already_in = any(p['user_id'] == user.id for p in participants_list)
         if is_already_in:
             await interaction.followup.send("Vous êtes déjà inscrit à cet événement.", ephemeral=True)
             return
 
-        # Vérifier si l'événement est plein
-        if max_participants and len(participants_list) >= max_participants:
-            await interaction.followup.send("Désolé, les inscriptions sont fermées car l'événement a atteint sa capacité maximale.", ephemeral=True)
-            return
-        
-        # Vérifier si l'événement a déjà commencé
+        # Vérifier si l'événement est plein ou a déjà commencé
         now = datetime.now(PARIS_TIMEZONE)
         start_time = event_data.get('start_time')
-        if start_time and start_time.astimezone(PARIS_TIMEZONE) <= now:
-            await interaction.followup.send("Désolé, les inscriptions sont fermées car l'événement a déjà commencé.", ephemeral=True)
+        
+        if (max_participants and len(participants_list) >= max_participants) or \
+           (start_time and start_time.astimezone(PARIS_TIMEZONE) <= now):
+            await interaction.followup.send("Désolé, les inscriptions sont fermées.", ephemeral=True)
             return
-
+        
         # Ajouter l'utilisateur
         try:
             await user.add_roles(role, reason=f"Participation à l'événement {event_name}")
@@ -222,7 +232,14 @@ class AliasModal(discord.ui.Modal, title='Inscription à l\'événement'):
                         value=participant_names,
                         inline=False
                     )
-
+                
+                # Vérifier si les inscriptions sont complètes et envoyer un message
+                if max_participants and len(participants) == max_participants and not event_data.get('registrations_closed'):
+                    channel_waiting = guild.get_channel(event_data.get('channel_waiting_id'))
+                    if channel_waiting:
+                        await channel_waiting.send(f"@everyone Les inscriptions pour l'événement **'{event_data.get('name', 'Nom inconnu')}'** sont complètes !")
+                        await asyncio.to_thread(db.collection('events').document(self.event_firestore_id).update, {'registrations_closed': True})
+                
                 # Gérer l'état du bouton
                 view = EventButtons(self.event_firestore_id)
                 if max_participants and len(participants) >= max_participants:
@@ -314,10 +331,12 @@ class EventButtons(View):
 
 # --- Tâche de gestion des événements ---
 
-async def _end_event(event_doc_id: str):
+async def _end_event(event_doc_id: str, context_channel: Optional[discord.TextChannel] = None):
     """
     Fonction interne pour terminer un événement, retirer les rôles et nettoyer.
     Prend l'ID du document Firestore.
+    Le paramètre optionnel context_channel est utilisé pour envoyer un message de confirmation
+    si l'événement est terminé par une commande manuelle.
     """
     event_ref = db.collection('events').document(event_doc_id)
     event_doc = await asyncio.to_thread(event_ref.get)
@@ -354,52 +373,127 @@ async def _end_event(event_doc_id: str):
             except Exception as e:
                 print(f"Erreur lors du retrait du rôle à {member.display_name}: {e}")
     
-    # Mettre à jour le message de l'événement
+    # Mettre à jour le message de l'événement s'il existe
+    event_message = None
     try:
         message_id = event_data.get('message_id')
         if channel_waiting and message_id:
             event_message = await channel_waiting.fetch_message(message_id)
-            if event_message:
-                embed = event_message.embeds[0]
-                embed.color = 0x8B0000  # Rouge foncé pour indiquer la fin
-                embed.description = f"**Événement terminé.**"
-                embed.clear_fields()
-                
-                participants_names = await get_participant_info(guild, participants_list)
-                
-                embed.add_field(name=f"Participants finaux ({len(participants_list)}/{event_data.get('max_participants', 'N/A')} {event_data.get('participant_label', 'participants')})", value=participants_names, inline=False)
-                await event_message.edit(embed=embed, view=None) # view=None pour retirer les boutons
-                await channel_waiting.send(f"@everyone L'événement **'{event_name}'** est maintenant terminé.")
     except discord.NotFound:
-        print(f"Erreur : Message de l'événement {event_name} non trouvé sur Discord. L'événement sera supprimé de la base de données.")
-        # Le message est supprimé, donc on peut nettoyer la base de données.
-        await asyncio.to_thread(event_ref.delete)
+        print(f"Erreur : Message de l'événement {event_name} non trouvé. Il a peut-être été supprimé.")
     except Exception as e:
-        print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
+        print(f"Erreur lors de la récupération du message de l'événement : {e}")
+    
+    if event_message:
+        try:
+            embed = event_message.embeds[0]
+            embed.color = 0x8B0000
+            embed.description = f"**Événement terminé.**"
+            embed.clear_fields()
+            
+            participants_names = await get_participant_info(guild, participants_list)
+            
+            embed.add_field(name=f"Participants finaux ({len(participants_list)}/{event_data.get('max_participants', 'N/A')} {event_data.get('participant_label', 'participants')})", value=participants_names, inline=False)
+            await event_message.edit(content=f"@everyone L'événement **'{event_name}'** est maintenant terminé.", embed=embed, view=None)
+        except Exception as e:
+            print(f"Erreur lors de la mise à jour du message de l'événement : {e}")
+    else:
+        # Si le message n'est pas trouvé, envoie un message de confirmation
+        # dans le canal de la commande (s'il y en a un).
+        if context_channel:
+            try:
+                await context_channel.send(f"L'événement **'{event_name}'** a été terminé, mais le message original a été supprimé. Les rôles ont été retirés aux participants.", delete_after=60)
+            except discord.Forbidden:
+                print(f"Permissions insuffisantes pour envoyer un message dans le canal {context_channel.name}.")
+            except Exception as e:
+                print(f"Erreur lors de l'envoi du message de confirmation : {e}")
         
-    # Si le message existe toujours, on supprime l'événement après la mise à jour.
-    if event_doc.exists:
-        await asyncio.to_thread(event_ref.delete)
-        print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
+    # Suppression de l'événement de Firestore.
+    await asyncio.to_thread(event_ref.delete)
+    print(f"Événement '{event_name}' (ID: {event_doc_id}) supprimé de Firestore.")
 
 
 @tasks.loop(minutes=1)
-async def check_expired_events():
-    """Tâche en arrière-plan pour vérifier et terminer les événements expirés."""
-    print("Vérification des événements expirés...")
+async def update_event_messages():
+    """Tâche en arrière-plan pour vérifier et mettre à jour les événements."""
+    print("Mise à jour des événements en cours...")
     events_ref = db.collection('events')
     now = datetime.now(PARIS_TIMEZONE)
     
-    # Utiliser to_thread pour éviter de bloquer l'event loop
     active_events_docs = await asyncio.to_thread(events_ref.stream)
     
     for doc in active_events_docs:
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
+        event_start_time = event_data.get('start_time')
         
         if event_end_time and event_end_time.astimezone(PARIS_TIMEZONE) < now:
             print(f"Événement '{event_data.get('name', doc.id)}' expiré. Fin de l'événement...")
             await _end_event(doc.id)
+            continue
+        
+        # Logique pour le début de l'événement
+        if event_start_time and event_start_time.astimezone(PARIS_TIMEZONE) <= now and not event_data.get('has_started'):
+            print(f"Événement '{event_data.get('name', doc.id)}' a commencé.")
+            guild = bot.get_guild(event_data.get('guild_id'))
+            if guild:
+                channel_waiting = guild.get_channel(event_data.get('channel_waiting_id'))
+                if channel_waiting:
+                    await channel_waiting.send(f"@everyone L'événement **'{event_data.get('name', 'Nom inconnu')}'** a commencé ! Bonne partie !")
+            
+            # Mettre à jour l'état de l'événement dans Firestore
+            await asyncio.to_thread(doc.reference.update, {'has_started': True})
+            
+            # Mettre à jour le message de l'événement (description et suppression des boutons)
+            try:
+                message_id = event_data.get('message_id')
+                if channel_waiting and message_id:
+                    event_message = await channel_waiting.fetch_message(message_id)
+                    embed = event_message.embeds[0]
+                    embed.color = discord.Color.green()
+                    embed.description = f"**L'événement a commencé !** Il se terminera <t:{int(event_end_time.timestamp())}:R>."
+                    
+                    # Supprimer les boutons
+                    await event_message.edit(embed=embed, view=None)
+            except discord.NotFound:
+                print(f"Le message de l'événement {event_data.get('name')} n'a pas été trouvé pour la mise à jour de début.")
+            except Exception as e:
+                print(f"Erreur lors de la mise à jour du message de début d'événement : {e}")
+
+        # Mise à jour du timer pour les événements en cours ou à venir
+        try:
+            message_id = event_data.get('message_id')
+            guild = bot.get_guild(event_data.get('guild_id'))
+            if guild:
+                channel_waiting = guild.get_channel(event_data.get('channel_waiting_id'))
+                if channel_waiting and message_id:
+                    event_message = await channel_waiting.fetch_message(message_id)
+                    embed = event_message.embeds[0]
+
+                    # Mettre à jour le champ du timer
+                    start_time_timestamp = int(event_start_time.timestamp())
+                    end_time_timestamp = int(event_end_time.timestamp())
+                    
+                    if now < event_start_time.astimezone(PARIS_TIMEZONE):
+                        # Avant le début de l'événement
+                        timer_value = f"Début : <t:{start_time_timestamp}:f> (dans <t:{start_time_timestamp}:R>)"
+                    else:
+                        # Après le début de l'événement
+                        timer_value = f"Fin : <t:{end_time_timestamp}:f> (dans <t:{end_time_timestamp}:R>)"
+
+                    # Trouver le champ 'Début' ou 'Fin' et le mettre à jour
+                    for i, field in enumerate(embed.fields):
+                        if field.name.startswith("Début") or field.name.startswith("Fin"):
+                            embed.set_field_at(i, name="Début / Fin", value=timer_value, inline=False)
+                            break
+                    
+                    await event_message.edit(embed=embed)
+
+        except discord.NotFound:
+            print(f"Message de l'événement {event_data.get('name', 'nom inconnu')} introuvable lors de la mise à jour du timer.")
+            continue
+        except Exception as e:
+            print(f"Erreur lors de la mise à jour du timer pour l'événement {event_data.get('name', 'nom inconnu')} : {e}")
 
 
 # --- Commandes du bot ---
@@ -407,14 +501,25 @@ async def check_expired_events():
 async def _create_event_handler(ctx, role: discord.Role, duration: str, start_time: str, channel_waiting: discord.TextChannel, channel_private: discord.TextChannel, max_participants: int, participant_label: str, event_name: str, start_date: str = None):
     """Fonction interne pour gérer la création d'un événement."""
     
+    # Supprimer le message de la commande
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass # Le message a déjà été supprimé
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+    
     # Vérifier si l'événement existe déjà dans Firestore
     events_ref = db.collection('events')
-    existing_event = await asyncio.to_thread(events_ref.where('name', '==', event_name).get)
+    # Utilisation de l'argument 'filter' pour éviter le UserWarning
+    existing_event = await asyncio.to_thread(events_ref.where(filter=firestore.FieldFilter('name', '==', event_name)).get)
     if existing_event:
         msg = await ctx.send(f"⚠️ Un événement nommé '{event_name}' existe déjà.", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
         return
 
     try:
@@ -439,10 +544,12 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
         end_datetime = start_datetime + timedelta(seconds=duration_seconds)
 
     except (ValueError, IndexError, TypeError) as e:
-        msg = await ctx.send(f"❌ Erreur de format des arguments. {e}\nUtilisation correcte : `!help {ctx.command}`", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        msg = await ctx.send(f"❌ Erreur de format des arguments. {e}\nUtilisation correcte : `!helpoxel {ctx.command}`", delete_after=60)
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
         return
 
     # Créer un message temporaire pour obtenir l'ID du message
@@ -460,7 +567,9 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
         'participant_label': participant_label,
         'participants': [],
         'message_id': temp_message.id,
-        'guild_id': ctx.guild.id
+        'guild_id': ctx.guild.id,
+        'has_started': False,
+        'registrations_closed': False
     }
     doc_ref = db.collection('events').document()
     await asyncio.to_thread(doc_ref.set, event_data_firestore)
@@ -469,7 +578,7 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
     # Création des boutons
     view = EventButtons(event_firestore_id)
     
-    embed = create_retro_embed(f"NEW EVENT : {event_name}")
+    embed = create_retro_embed(f"NOUVEL ÉVÉNEMENT : {event_name}")
     embed.description = (
         f"**Le rôle** {role.mention} **vous sera attribué une fois inscrit.** "
         f"Veuillez rejoindre le **point de ralliement** et patienter d’être déplacé dans le **salon privé**."
@@ -477,15 +586,17 @@ async def _create_event_handler(ctx, role: discord.Role, duration: str, start_ti
     
     embed.add_field(name="Point de ralliement", value=channel_waiting.mention, inline=True)
     embed.add_field(name="Salon privé", value=channel_private.mention, inline=True)
-    embed.add_field(name="Début", value=f"<t:{int(start_datetime.timestamp())}:f> (se termine <t:{int(end_datetime.timestamp())}:R>)", inline=False)
+    embed.add_field(name="Début / Fin", value=f"Début : <t:{int(start_datetime.timestamp())}:f> (dans <t:{int(start_datetime.timestamp())}:R>)", inline=False)
     embed.add_field(name=f"Participants (0/{max_participants} {participant_label})", value="Aucun participant", inline=False)
 
     await temp_message.edit(content=f"@everyone Un nouvel événement a été créé : **{event_name}** !", embed=embed, view=view)
     
     msg_confirm = await ctx.send(f"L'événement **'{event_name}'** a été créé avec succès.", delete_after=60)
-    await asyncio.sleep(60)
-    await ctx.message.delete()
-    await msg_confirm.delete()
+    try:
+        await asyncio.sleep(60)
+        await msg_confirm.delete()
+    except discord.NotFound:
+        pass
 
 
 @bot.command(name='create_event')
@@ -504,30 +615,47 @@ async def create_event_plan(ctx, role: discord.Role, duration: str, start_date: 
 @commands.has_permissions(manage_roles=True)
 async def end_event_command(ctx, *, event_name: str):
     """Termine manuellement un événement et retire les rôles."""
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+
     events_ref = db.collection('events')
-    existing_event_docs = await asyncio.to_thread(events_ref.where('name', '==', event_name).get)
+    # Utilisation de l'argument 'filter' pour éviter le UserWarning
+    existing_event_docs = await asyncio.to_thread(events_ref.where(filter=firestore.FieldFilter('name', '==', event_name)).get)
 
     if not existing_event_docs:
         msg = await ctx.send(f"L'événement **'{event_name}'** n'existe pas ou est déjà terminé.", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
         return
 
     event_doc_id = existing_event_docs[0].id
     
     msg = await ctx.send(f"L'événement **'{event_name}'** est en cours de fermeture...", delete_after=60)
-    await _end_event(event_doc_id)
-    msg_confirm = await ctx.send(f"L'événement **'{event_name}'** a été terminé manuellement.", delete_after=60)
-    await asyncio.sleep(60)
-    await ctx.message.delete()
-    await msg.delete()
-    await msg_confirm.delete()
+    await _end_event(event_doc_id, context_channel=ctx.channel)
+    try:
+        await asyncio.sleep(60)
+        await msg.delete()
+    except discord.NotFound:
+        pass
 
 
 @bot.command(name='list_events')
 async def list_events(ctx):
     """Affiche tous les événements actifs avec leurs détails."""
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+
     events_ref = db.collection('events')
     active_events_docs = await asyncio.to_thread(events_ref.stream)
 
@@ -537,9 +665,11 @@ async def list_events(ctx):
 
     if not events_list:
         msg = await ctx.send("Aucun événement actif pour le moment.", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
         return
 
     embed = create_retro_embed("LISTE DES ÉVÉNEMENTS ACTIFS")
@@ -563,8 +693,8 @@ async def list_events(ctx):
         # S'assurer que les temps existent avant d'essayer de les formater
         end_time_stamp = int(data['end_time'].timestamp()) if data.get('end_time') else 'N/A'
         start_time_stamp = int(data['start_time'].timestamp()) if data.get('start_time') else 'N/A'
-
-
+        
+        
         embed.add_field(
             name=f"🎮 {data.get('name', 'Événement sans nom')}",
             value=(
@@ -578,9 +708,12 @@ async def list_events(ctx):
         )
 
     msg = await ctx.send(embed=embed, delete_after=300)
-    await asyncio.sleep(300)
-    await ctx.message.delete()
-    await msg.delete()
+    try:
+        await asyncio.sleep(300)
+        await msg.delete()
+    except discord.NotFound:
+        pass
+
 
 # --- Événements du Bot ---
 
@@ -589,34 +722,49 @@ async def on_ready():
     """Se déclenche lorsque le bot est connecté à Discord."""
     print(f'Connecté en tant que {bot.user.name} ({bot.user.id})')
     print('Prêt à gérer les événements !')
-    check_expired_events.start()
+    update_event_messages.start()
 
 @bot.event
 async def on_command_error(ctx, error):
     """Gère les erreurs de commande."""
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
+
     if isinstance(error, commands.MissingRequiredArgument):
-        msg = await ctx.send(f"Il manque un argument pour cette commande. Utilisation correcte : `!help {ctx.command}`.", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        msg = await ctx.send(f"Il manque un argument pour cette commande. Utilisation correcte : `!helpoxel {ctx.command}`.", delete_after=60)
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
     elif isinstance(error, commands.BadArgument):
-        msg = await ctx.send(f"Argument invalide. Veuillez vérifier le format de vos arguments dans le manuel `!help {ctx.command}`.", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        msg = await ctx.send(f"Argument invalide. Veuillez vérifier le format de vos arguments dans le manuel `!helpoxel {ctx.command}`.", delete_after=60)
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
     elif isinstance(error, commands.MissingPermissions):
         msg = await ctx.send("Vous n'avez pas les permissions nécessaires pour exécuter cette commande (Gérer les rôles).", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
     elif isinstance(error, commands.CommandNotFound):
         pass # Ignore les commandes non trouvées pour ne pas spammer le chat
     else:
         print(f"Erreur de commande : {error}")
         msg = await ctx.send(f"Une erreur inattendue s'est produite : `{error}`", delete_after=60)
-        await asyncio.sleep(60)
-        await ctx.message.delete()
-        await msg.delete()
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
 
 
 @bot.command(name='helpoxel')
@@ -624,7 +772,12 @@ async def help_command(ctx, *, command_name: str = None):
     """Affiche le manuel d'aide de Poxel pour une commande spécifique."""
     
     # Supprimer le message initial de l'utilisateur
-    await ctx.message.delete()
+    try:
+        await ctx.message.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"Erreur lors de la suppression du message de commande : {e}")
     
     if command_name is None:
         embed = create_retro_embed("MANUEL DE POXEL")
@@ -640,15 +793,21 @@ async def help_command(ctx, *, command_name: str = None):
             embed.add_field(name=f"**!{name}**", value=desc, inline=False)
         
         msg = await ctx.send(embed=embed, delete_after=180)
-        await asyncio.sleep(180)
-        await msg.delete()
+        try:
+            await asyncio.sleep(180)
+            await msg.delete()
+        except discord.NotFound:
+            pass
         return
 
     command = bot.get_command(command_name)
     if command is None:
         msg = await ctx.send(f"La commande `!{command_name}` n'existe pas.", delete_after=60)
-        await asyncio.sleep(60)
-        await msg.delete()
+        try:
+            await asyncio.sleep(60)
+            await msg.delete()
+        except discord.NotFound:
+            pass
         return
     
     embed = create_retro_embed(f"MANUEL DE LA COMMANDE `!{command.name.upper()}`")
@@ -665,8 +824,12 @@ async def help_command(ctx, *, command_name: str = None):
         embed.add_field(name="Exemple", value="`!list_events`", inline=False)
 
     msg = await ctx.send(embed=embed, delete_after=180)
-    await asyncio.sleep(180)
-    await msg.delete()
+    try:
+        await asyncio.sleep(180)
+        await msg.delete()
+    except discord.NotFound:
+        pass
+
 
 # --- Démarrage du Bot ---
 bot.run(BOT_TOKEN)
