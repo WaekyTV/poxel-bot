@@ -378,7 +378,8 @@ async def check_expired_events():
         event_data = doc.to_dict()
         event_end_time = event_data.get('end_time')
         
-        if event_end_time and isinstance(event_end_time, firestore.firestore.Timestamp):
+        # Correction de l'erreur : utilisez firestore.Timestamp, pas firestore.firestore.Timestamp
+        if event_end_time and isinstance(event_end_time, firestore.Timestamp):
             if event_end_time.astimezone() < now.astimezone():
                 print(f"Événement '{event_data.get('name', doc.id)}' expiré. Fin de l'événement...")
                 await _end_event(doc.id)
