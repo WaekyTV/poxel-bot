@@ -745,7 +745,7 @@ async def create_event(
             'participants': [],
             'registrations_closed': False,
             'has_started': False,
-        )
+        }
 
         # Création de l'embed
         embed = create_retro_embed(f"NOUVEL ÉVÉNEMENT : {event_name}")
