@@ -3,6 +3,7 @@
 import os
 import asyncio
 from datetime import datetime, timedelta
+import pytz
 
 import discord
 from discord.ext import commands, tasks
@@ -15,11 +16,11 @@ from flask import Flask
 #    - Allez dans la console Firebase -> Paramètres du projet -> Comptes de service.
 #    - Générez une nouvelle clé privée et téléchargez le fichier JSON.
 # 2. Sauvegardez le contenu du fichier JSON dans une variable d'environnement sur Render.
-#    Appelez la variable FIREBASE_CREDENTIALS_JSON.
+#    Appelez la variable FIREBASE_SERVICE_ACCOUNT_KEY_JSON.
 #    Pour cela, copiez le contenu du JSON, puis définissez la variable d'environnement avec cette valeur.
 
 # Vérifie si la variable d'environnement existe
-firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+firebase_creds_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY_JSON')
 if firebase_creds_json:
     # Sauvegarde temporairement les identifiants dans un fichier pour firebase_admin
     with open('firebase_creds.json', 'w') as f:
@@ -31,7 +32,7 @@ if firebase_creds_json:
     db = firestore.client()
     print("Firebase a été initialisé avec succès.")
 else:
-    print("Erreur: La variable d'environnement 'FIREBASE_CREDENTIALS_JSON' n'est pas définie.")
+    print("Erreur: La variable d'environnement 'FIREBASE_SERVICE_ACCOUNT_KEY_JSON' n'est pas définie.")
     print("Le bot ne pourra pas se connecter à Firebase.")
     db = None
 
@@ -105,7 +106,7 @@ async def create_event(ctx, duration: str, role: discord.Role, *, description: s
         return
 
     # Calcule l'heure de fin
-    end_time = datetime.utcnow() + event_duration
+    end_time = datetime.now(pytz.utc) + event_duration
     
     # Crée un message d'événement
     event_message = await ctx.send(
@@ -121,6 +122,7 @@ async def create_event(ctx, duration: str, role: discord.Role, *, description: s
         'guild_id': str(ctx.guild.id),
         'role_id': str(role.id),
         'end_time': end_time,
+        'description': description, # Ajout de la description pour la commande de liste
         'participants': []
     }
     
@@ -167,7 +169,50 @@ async def join_event(ctx, event_id: str):
     doc_ref.update({'participants': data['participants']})
     
     await ctx.send(f"{member.mention} a rejoint l'événement. Le rôle **{role.name}** vous a été attribué temporairement.")
+
+@bot.command(name='list_events')
+async def list_events(ctx):
+    """
+    Affiche la liste de tous les événements actifs.
+    """
+    if not db:
+        await ctx.send("Erreur: La base de données n'est pas connectée.")
+        return
+
+    events_ref = db.collection('events')
+    docs = events_ref.stream()
     
+    active_events = []
+    for doc in docs:
+        event_data = doc.to_dict()
+        remaining_time = event_data['end_time'].replace(tzinfo=pytz.utc) - datetime.now(pytz.utc)
+        
+        # Formate le temps restant en heures, minutes, secondes
+        hours, remainder = divmod(remaining_time.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        remaining_time_str = f"{hours}h {minutes}m {seconds}s"
+        
+        active_events.append({
+            'id': doc.id,
+            'description': event_data.get('description', 'Pas de description'),
+            'participants': len(event_data['participants']),
+            'remaining_time': remaining_time_str
+        })
+        
+    if not active_events:
+        await ctx.send("Il n'y a aucun événement actif pour le moment.")
+    else:
+        embed = discord.Embed(title="Événements Actifs", color=discord.Color.blue())
+        for event in active_events:
+            embed.add_field(
+                name=f"ID: {event['id']} ({event['description']})",
+                value=f"Participants: {event['participants']}\nTemps restant: {event['remaining_time']}",
+                inline=False
+            )
+        await ctx.send(embed=embed)
+
+
 @bot.command(name='end_event')
 @commands.has_permissions(manage_roles=True)
 async def end_event(ctx, event_id: str):
@@ -211,7 +256,7 @@ async def check_expired_events():
     events_ref = db.collection('events')
     
     # Requête pour les événements dont l'heure de fin est passée
-    query = events_ref.where('end_time', '<', datetime.utcnow())
+    query = events_ref.where('end_time', '<', datetime.now(pytz.utc))
     
     docs = query.stream()
     
@@ -239,9 +284,9 @@ async def check_expired_events():
 # Exécute à la fois le bot Discord et le serveur Flask
 async def main():
     """Point d'entrée pour exécuter le bot et le serveur Flask."""
-    discord_token = os.environ.get('DISCORD_TOKEN')
+    discord_token = os.environ.get('DISCORD_BOT_TOKEN')
     if not discord_token:
-        print("Erreur: La variable d'environnement 'DISCORD_TOKEN' n'est pas définie.")
+        print("Erreur: La variable d'environnement 'DISCORD_BOT_TOKEN' n'est pas définie.")
         return
 
     # Crée un objet pour le processus Flask
@@ -255,4 +300,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
