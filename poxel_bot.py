@@ -465,14 +465,25 @@ async def on_command_error(ctx, error):
     print(f"Erreur de commande détectée: {error}")
     message = None
     if isinstance(error, commands.MissingPermissions):
-        message = await ctx.send("ERREUR: PERMISSIONS INSUFFISANTES. VOUS DEVEZ AVOIR LA PERMISSION `Gérer les rôles` POUR UTILISER CETTE COMMANDE.")
+        message = await ctx.send("ERREUR DE PERMISSIONS : Vous devez avoir la permission `Gérer les rôles` pour utiliser cette commande.")
     elif isinstance(error, commands.BadArgument):
-        message = await ctx.send(f"ERREUR: ARGUMENT INVALIDE. VEUILLEZ VERIFIER LA SYNTAXE DE LA COMMANDE `!helpoxel {ctx.command.name}`.")
+        # Explique l'erreur et redirige l'utilisateur vers la commande d'aide
+        message = await ctx.send(
+            f"ERREUR DE SYNTAXE : L'un des arguments que vous avez fournis est incorrect. "
+            f"Veuillez vérifier la syntaxe de la commande avec `!helpoxel {ctx.command.name}`."
+        )
     elif isinstance(error, commands.CommandNotFound):
         # Ne pas envoyer de message pour les commandes non trouvées pour ne pas spammer
         return
+    elif isinstance(error, discord.ext.commands.errors.CommandInvokeError) and isinstance(error.original, discord.errors.HTTPException):
+        # Gestion spécifique des erreurs de formulaire
+        message = await ctx.send(
+            f"ERREUR D'API : Il y a un problème technique avec les données envoyées à Discord. "
+            f"Le message d'erreur d'origine est: `{error.original}`. "
+            f"Veuillez signaler cette erreur à un administrateur."
+        )
     else:
-        message = await ctx.send(f"UNE ERREUR INCONNUE S'EST PRODUITE: {error}. VEUILLEZ CONTACTER UN ADMINISTRATEUR.")
+        message = await ctx.send(f"UNE ERREUR INCONNUE S'EST PRODUITE : `{error}`. VEUILLEZ CONTACTER UN ADMINISTRATEUR.")
         
     if message:
         # Ajoute le message d'erreur à la liste pour le nettoyage
@@ -532,16 +543,45 @@ async def create_event(ctx, start_time_str: str, duration: str, role: discord.Ro
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
 
+    # --- NOUVEAU: Vérification de l'existence d'un événement avec le même titre ---
+    async with ctx.typing():
+        docs = db.collection('events').where('event_title', '==', event_title).get()
+        if len(docs) > 0:
+            response = await ctx.send(f"ERREUR : Un événement nommé `{event_title}` existe déjà. Veuillez utiliser un autre nom ou fermer l'événement existant avec `!end_event`.")
+            messages_to_clean.append({
+                'message': response,
+                'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+            })
+            return
+
     # Analyse l'heure de début et la durée
     start_time = parse_time(start_time_str)
     event_duration = parse_duration(duration)
     
     if not start_time:
-        await ctx.send("ERREUR. FORMAT HEURE INVALIDE. UTILISEZ 'HH:MM'.")
+        response = await ctx.send("ERREUR. FORMAT HEURE INVALIDE. UTILISEZ 'HH:MM'.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
         return
         
     if not event_duration:
-        await ctx.send("ERREUR. FORMAT DUREE INVALIDE. UTILISEZ '1h30m'.")
+        response = await ctx.send("ERREUR. FORMAT DUREE INVALIDE. UTILISEZ '1h30m'.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
+        return
+    
+    # --- NOUVEAU : Vérification de l'heure de début ---
+    now = datetime.now(pytz.utc)
+    if start_time < now:
+        response = await ctx.send(f"ERREUR : L'heure de début ({start_time.strftime('%H:%M')}) ne peut pas être dans le passé. Veuillez choisir une heure future.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
         return
 
     end_time = start_time + event_duration
@@ -618,18 +658,47 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
+
+    # --- NOUVEAU: Vérification de l'existence d'un événement avec le même titre ---
+    async with ctx.typing():
+        docs = db.collection('events').where('event_title', '==', event_title).get()
+        if len(docs) > 0:
+            response = await ctx.send(f"ERREUR : Un événement nommé `{event_title}` existe déjà. Veuillez utiliser un autre nom ou fermer l'événement existant avec `!end_event`.")
+            messages_to_clean.append({
+                'message': response,
+                'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+            })
+            return
     
     try:
         # Combine la date et l'heure en un seul objet datetime
         start_datetime_str = f"{date_str} {start_time_str}"
         start_time = datetime.strptime(start_datetime_str, '%Y-%m-%d %H:%M').replace(tzinfo=pytz.utc)
     except ValueError:
-        await ctx.send("ERREUR. FORMAT DATE OU HEURE INVALIDE. UTILISEZ 'AAAA-MM-JJ HH:MM'.")
+        response = await ctx.send("ERREUR. FORMAT DATE OU HEURE INVALIDE. UTILISEZ 'AAAA-MM-JJ HH:MM'.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
         return
         
     event_duration = parse_duration(duration)
     if not event_duration:
-        await ctx.send("ERREUR. FORMAT DUREE INVALIDE. UTILISEZ '1h30m'.")
+        response = await ctx.send("ERREUR. FORMAT DUREE INVALIDE. UTILISEZ '1h30m'.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
+        return
+    
+    # --- NOUVEAU : Vérification de l'heure de début ---
+    now = datetime.now(pytz.utc)
+    if start_time < now:
+        response = await ctx.send(f"ERREUR : La date et l'heure de début ({start_time.strftime('%d-%m-%Y %H:%M')}) ne peuvent pas être dans le passé. Veuillez choisir une date future.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
         return
         
     end_time = start_time + event_duration
@@ -791,12 +860,37 @@ async def create_contest(ctx, deadline_date_str: str, deadline_time_str: str, pa
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
+
+    # --- NOUVEAU: Vérification de l'existence d'un événement avec le même titre ---
+    async with ctx.typing():
+        docs = db.collection('events').where('event_title', '==', event_title).get()
+        if len(docs) > 0:
+            response = await ctx.send(f"ERREUR : Un concours nommé `{event_title}` existe déjà. Veuillez utiliser un autre nom ou fermer l'événement existant avec `!end_event`.")
+            messages_to_clean.append({
+                'message': response,
+                'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+            })
+            return
         
     try:
         deadline_datetime_str = f"{deadline_date_str} {deadline_time_str}"
         deadline_time = datetime.strptime(deadline_datetime_str, '%Y-%m-%d %H:%M').replace(tzinfo=pytz.utc)
     except ValueError:
-        await ctx.send("ERREUR. FORMAT DATE OU HEURE INVALIDE. UTILISEZ 'AAAA-MM-JJ HH:MM'.")
+        response = await ctx.send("ERREUR. FORMAT DATE OU HEURE INVALIDE. UTILISEZ 'AAAA-MM-JJ HH:MM'.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
+        return
+    
+    # --- NOUVEAU : Vérification de l'heure limite ---
+    now = datetime.now(pytz.utc)
+    if deadline_time < now:
+        response = await ctx.send(f"ERREUR : L'heure limite ({deadline_time.strftime('%d-%m-%Y %H:%M')}) ne peut pas être dans le passé. Veuillez choisir une date future.")
+        messages_to_clean.append({
+            'message': response,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
         return
         
     event_data = {
