@@ -1,9 +1,4 @@
-Flask
-pytz
 discord.py
 firebase-admin
-python-dotenv
+Flask
 gunicorn
-
-discord.py==2.3.2
-humanize
