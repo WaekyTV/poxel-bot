@@ -9,15 +9,27 @@ from firebase_admin import credentials, firestore
 from discord.ext import commands
 import pytz # Import du module pour la gestion des fuseaux horaires
 
-# Initialisation de Firebase
-try:
-    firebase_config = json.loads(os.getenv('__firebase_config'))
-    cred = credentials.Certificate(firebase_config)
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-except Exception as e:
-    print(f"Erreur d'initialisation de Firebase: {e}. Le bot ne fonctionnera pas correctement.")
-    db = None
+# --- Initialisation de Firebase et du bot ---
+# Récupère la clé de service Firebase depuis la variable d'environnement
+firebase_creds_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY_JSON')
+db = None # Initialisation de la variable db à None
+
+if firebase_creds_json:
+    # Sauvegarde temporairement les identifiants dans un fichier pour firebase_admin
+    with open('firebase_creds.json', 'w') as f:
+        f.write(firebase_creds_json)
+
+    try:
+        # Initialise l'application Firebase
+        cred = credentials.Certificate('firebase_creds.json')
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        print("Firebase a été initialisé avec succès.")
+    except Exception as e:
+        print(f"Erreur lors de l'initialisation de Firebase: {e}")
+else:
+    print("Erreur: La variable d'environnement 'FIREBASE_SERVICE_ACCOUNT_KEY_JSON' n'est pas définie. Le bot ne pourra pas utiliser la base de données.")
+
 
 # Configuration du bot Discord
 intents = discord.Intents.default()
@@ -465,4 +477,9 @@ async def on_ready():
     bot.loop.create_task(update_events_loop())
     bot.loop.create_task(update_embed_timers_loop())
 
-bot.run("YOUR_BOT_TOKEN")
+# Obtient le token du bot depuis les variables d'environnement
+token = os.environ.get('DISCORD_BOT_TOKEN')
+if not token:
+    print("Erreur: Le token du bot Discord 'DISCORD_BOT_TOKEN' n'est pas défini.")
+else:
+    bot.run(token)
