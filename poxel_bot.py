@@ -54,14 +54,14 @@ COMMANDS_HELP = {
         'example': "!helpoxel create_event"
     },
     'create_event': {
-        'description': "Crée un nouvel événement avec des paramètres détaillés.",
-        'syntax': "!create_event <heure_début> <durée> <@rôle> <#salon_annonce> <#salon_attente> <limite_participants> <titre>",
-        'example': "!create_event 20:00 2h30m @Participants #annonces #salle-attente 10 Soirée Gaming!"
+        'description': "Crée un nouvel événement et ajoute des participants si nécessaire.",
+        'syntax': "!create_event <heure_début> <durée> <@rôle> <#salon_annonce> <#salle_attente> <limite_participants> <nom_participants> <description>",
+        'example': "!create_event 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée Gaming!"
     },
     'create_event_plan': {
-        'description': "Crée un événement planifié pour une date et une heure futures, avec un rappel le jour J.",
-        'syntax': "!create_event_plan <date> <heure_début> <durée> <@rôle> <#salon_annonce> <#salon_attente> <limite_participants> <titre>",
-        'example': "!create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 Soirée de Noël"
+        'description': "Crée un événement planifié pour une date et une heure futures, et ajoute des participants si nécessaire.",
+        'syntax': "!create_event_plan <date> <heure_début> <durée> <@rôle> <#salon_annonce> <#salle_attente> <limite_participants> <nom_participants> <description>",
+        'example': "!create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée de Noël"
     },
     'list_events': {
         'description': "Affiche la liste de tous les événements actifs.",
@@ -82,6 +82,11 @@ COMMANDS_HELP = {
         'description': "Effectue un tirage au sort parmi les participants d'un événement ou d'un concours et annonce un gagnant.",
         'syntax': "!raffle_event <ID_de_l'événement>",
         'example': "!raffle_event 123456789012345678"
+    },
+    'test_permissions': {
+        'description': "Vérifie si vous avez les permissions nécessaires pour créer des événements.",
+        'syntax': "!test_permissions",
+        'example': "!test_permissions"
     }
 }
 
@@ -97,6 +102,10 @@ def home():
 # URL d'un GIF d'animation 8-bit pour les embeds
 PIXEL_ART_GIF_URL = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExd3N0ZDR2eWdzNnIzbWk0djZicTNrZTRtb3VkYjE0bW9yMnR0ZGg3ayZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/kFfMhJ5wM5uG7hD12A/giphy.gif"
 
+# Liste pour le nettoyage automatique des messages
+messages_to_clean = []
+# Délai en secondes avant de supprimer un message
+CLEANUP_DELAY_SECONDS = 120 # 2 minutes
 
 # --- Fonctions utilitaires ---
 def parse_duration(duration_str):
@@ -252,8 +261,9 @@ async def update_event_message(event_data, view_to_remove=False):
         embed.description = (
             f"BIENVENUE JOUEUR !\n"
             f"ROLE ATTRIBUE AU DEMARRAGE : <@&{event_data['role_id']}>\n"
-            f"POINT DE RALLIEMENT : {event_data['waiting_room_channel_id']}\n"
-            f"DEPLACEMENT AUTOMATIQUE A L'HEURE DE DEBUT !"
+            f"POINT DE RALLIEMENT : <#{event_data['waiting_room_channel_id']}>\n"
+            f"DEPLACEMENT AUTOMATIQUE A L'HEURE DE DEBUT !\n"
+            f"PARTICIPANTS REQUIS : {event_data.get('participant_group_name', 'NON SPECIFIE').upper()}"
         )
     
         if now < start_time:
@@ -276,7 +286,7 @@ async def update_event_message(event_data, view_to_remove=False):
             
     embed.add_field(name="LISTE DES JOUEURS", value=", ".join(participant_mentions) if participant_mentions else "AUCUN JOUEUR INSCRIT", inline=False)
     
-    # Crée une nouvelle vue pour mettre à jour les boutons
+    # Crée une nouvelle view pour mettre à jour les boutons
     new_view = EventButtonsView(event_id=event_data['message_id'], event_data=event_data)
     
     await message.edit(embed=embed, view=new_view)
@@ -447,13 +457,37 @@ async def on_ready():
     # Démarre la tâche de vérification des événements
     if db:
         update_events_loop.start()
+        cleanup_messages_loop.start()
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Gère les erreurs de commande et envoie un message privé à l'utilisateur."""
+    print(f"Erreur de commande détectée: {error}")
+    message = None
+    if isinstance(error, commands.MissingPermissions):
+        message = await ctx.send("ERREUR: PERMISSIONS INSUFFISANTES. VOUS DEVEZ AVOIR LA PERMISSION `Gérer les rôles` POUR UTILISER CETTE COMMANDE.")
+    elif isinstance(error, commands.BadArgument):
+        message = await ctx.send(f"ERREUR: ARGUMENT INVALIDE. VEUILLEZ VERIFIER LA SYNTAXE DE LA COMMANDE `!helpoxel {ctx.command.name}`.")
+    elif isinstance(error, commands.CommandNotFound):
+        # Ne pas envoyer de message pour les commandes non trouvées pour ne pas spammer
+        return
+    else:
+        message = await ctx.send(f"UNE ERREUR INCONNUE S'EST PRODUITE: {error}. VEUILLEZ CONTACTER UN ADMINISTRATEUR.")
         
+    if message:
+        # Ajoute le message d'erreur à la liste pour le nettoyage
+        messages_to_clean.append({
+            'message': message,
+            'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+        })
+
 # --- Commandes du bot ---
 @bot.command(name='helpoxel', aliases=['h'])
 async def helpoxel_command(ctx, command_name: str = None):
     """
     Affiche les commandes disponibles ou l'aide pour une commande spécifique.
     """
+    print(f"Commande !helpoxel reçue de {ctx.author} dans le salon {ctx.channel}.")
     if command_name:
         # Cherche de l'aide pour une commande spécifique
         command_info = COMMANDS_HELP.get(command_name.lower())
@@ -465,9 +499,9 @@ async def helpoxel_command(ctx, command_name: str = None):
             )
             embed.add_field(name="SYNTAXE", value=f"`{command_info['syntax']}`", inline=False)
             embed.add_field(name="EXEMPLE", value=f"`{command_info['example']}`", inline=False)
-            await ctx.send(embed=embed)
+            response = await ctx.send(embed=embed)
         else:
-            await ctx.send(f"COMMANDE `!{command_name}` NON RECONNUE. UTILISEZ `!HELPPOXEL`.")
+            response = await ctx.send(f"COMMANDE `!{command_name}` NON RECONNUE. UTILISEZ `!HELPPOXEL`.")
     else:
         # Affiche la liste de toutes les commandes
         embed = discord.Embed(
@@ -477,17 +511,23 @@ async def helpoxel_command(ctx, command_name: str = None):
         )
         for cmd, info in COMMANDS_HELP.items():
             embed.add_field(name=f"!{cmd.upper()}", value=info['description'], inline=False)
-        await ctx.send(embed=embed)
+        response = await ctx.send(embed=embed)
 
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
 
 @bot.command(name='create_event')
 @commands.has_permissions(manage_roles=True)
-async def create_event(ctx, start_time_str: str, duration: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, participant_limit: int, *, event_title: str):
+async def create_event(ctx, start_time_str: str, duration: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, participant_limit: int, participant_group_name: str, *, event_title: str):
     """
-    Crée un nouvel événement avec des paramètres détaillés.
-    Syntaxe: !create_event <heure_début> <durée_event> <@rôle> <#salon_annonce> <#salle_attente> <nombre_max_participants> <titre_event>
-    Exemple: !create_event 20:00 2h30m @Participants #annonces #salle-attente 10 Soirée Gaming!
+    Crée un nouvel événement et ajoute des participants si nécessaire.
+    Syntaxe: !create_event <heure_début> <durée_event> <@rôle> <#salon_annonce> <#salle_attente> <nombre_max_participants> <nom_des_participants> <description>
+    Exemple: !create_event 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée Gaming!
     """
+    print(f"Commande !create_event reçue de {ctx.author} avec les arguments: {ctx.args}")
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
@@ -516,10 +556,11 @@ async def create_event(ctx, start_time_str: str, duration: str, role: discord.Ro
         'announcement_channel_id': str(announcement_channel.id),
         'waiting_room_channel_id': str(waiting_room_channel.id),
         'participant_limit': participant_limit,
-        'participants': {}, # La liste des participants est désormais un dictionnaire { 'user_id': 'nickname' }
+        'participants': {},
         'has_started': False,
         'message_id': '',
-        'type': 'immediate' # Type d'événement : immédiat
+        'type': 'immediate',
+        'participant_group_name': participant_group_name
     }
 
     # Crée un embed initial au style 8-bit
@@ -527,7 +568,8 @@ async def create_event(ctx, start_time_str: str, duration: str, role: discord.Ro
         f"BIENVENUE JOUEUR !\n"
         f"ROLE ATTRIBUE AU DEMARRAGE : {role.mention}\n"
         f"POINT DE RALLIEMENT : {waiting_room_channel.mention}\n"
-        f"DEPLACEMENT AUTOMATIQUE A L'HEURE DE DEBUT !"
+        f"DEPLACEMENT AUTOMATIQUE A L'HEURE DE DEBUT !\n"
+        f"PARTICIPANTS REQUIS : {participant_group_name.upper()}"
     )
     
     embed = discord.Embed(
@@ -542,6 +584,7 @@ async def create_event(ctx, start_time_str: str, duration: str, role: discord.Ro
     embed.add_field(name="DEMARRAGE DANS", value="MISE A JOUR...", inline=True)
     embed.add_field(name="DUREE", value=duration.upper(), inline=True)
     embed.add_field(name="JOUEURS", value=f"0/{participant_limit}", inline=True)
+    
     embed.add_field(name="LISTE DES JOUEURS", value="AUCUN JOUEUR INSCRIT", inline=False)
     
     # Le message est envoyé avec une view (les boutons)
@@ -556,20 +599,26 @@ async def create_event(ctx, start_time_str: str, duration: str, role: discord.Ro
     # Envoi le message à @everyone après la création de l'événement
     await announcement_channel.send(f"@everyone | NOUVEL EVENEMENT CREE : **{event_title.upper()}**\n**CLIQUEZ SUR LE BOUTON POUR start !**")
     
-    await ctx.send(f"PARTIE LANCEE ! ID DE L'EVENEMENT : `{event_message.id}`")
+    response = await ctx.send(f"PARTIE LANCEE ! ID DE L'EVENEMENT : `{event_message.id}`")
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
 
 @bot.command(name='create_event_plan')
 @commands.has_permissions(manage_roles=True)
-async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, participant_limit: int, *, event_title: str):
+async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, participant_limit: int, participant_group_name: str, *, event_title: str):
     """
-    Crée un événement planifié pour une date et une heure futures.
-    Syntaxe: !create_event_plan <date> <heure_début> <durée> <@rôle> <#salon_annonce> <#salon_attente> <limite_participants> <titre>
-    Exemple: !create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 Soirée de Noël
+    Crée un événement planifié pour une date et une heure futures, et ajoute des participants si nécessaire.
+    Syntaxe: !create_event_plan <date> <heure_début> <durée> <@rôle> <#salon_annonce> <#salle_attente> <limite_participants> <nom_participants> <description>
+    Exemple: !create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée de Noël
     """
+    print(f"Commande !create_event_plan reçue de {ctx.author} avec les arguments: {ctx.args}")
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
-        
+    
     try:
         # Combine la date et l'heure en un seul objet datetime
         start_datetime_str = f"{date_str} {start_time_str}"
@@ -598,7 +647,8 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
         'participants': {},
         'has_started': False,
         'message_id': '',
-        'type': 'planned' # Type d'événement : planifié
+        'type': 'planned',
+        'participant_group_name': participant_group_name
     }
     
     # Crée un embed initial au style 8-bit
@@ -606,7 +656,8 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
         f"BIENVENUE JOUEUR !\n"
         f"ROLE ATTRIBUE AU DEMARRAGE : {role.mention}\n"
         f"POINT DE RALLIEMENT : {waiting_room_channel.mention}\n"
-        f"DEPLACEMENT AUTOMATIQUE A L'HEURE DE DEBUT !"
+        f"DEPLACEMENT AUTOMATIQUE A L'HEURE DE DEBUT !\n"
+        f"PARTICIPANTS REQUIS : {participant_group_name.upper()}"
     )
 
     embed = discord.Embed(
@@ -621,6 +672,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
     embed.add_field(name="DATE", value=start_time.strftime('%d/%m/%Y'), inline=True)
     embed.add_field(name="HEURE", value=start_time.strftime('%H:%M'), inline=True)
     embed.add_field(name="JOUEURS", value=f"0/{participant_limit}", inline=True)
+    
     embed.add_field(name="LISTE DES JOUEURS", value="AUCUN JOUEUR INSCRIT", inline=False)
     
     view = EventButtonsView(event_id="placeholder", event_data=event_data)
@@ -632,7 +684,12 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
 
     await announcement_channel.send(f"@everyone | NOUVEL EVENEMENT PLANIFIE : **{event_title.upper()}**\n**CLIQUEZ SUR LE BOUTON POUR start !**")
     
-    await ctx.send(f"PARTIE PLANIFIEE ! ID DE L'EVENEMENT : `{event_message.id}`")
+    response = await ctx.send(f"PARTIE PLANIFIEE ! ID DE L'EVENEMENT : `{event_message.id}`")
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
 
 @bot.command(name='list_events')
 @commands.has_permissions(manage_roles=True)
@@ -640,6 +697,7 @@ async def list_events(ctx):
     """
     Affiche la liste de tous les événements actifs avec leurs IDs.
     """
+    print(f"Commande !list_events reçue de {ctx.author}.")
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
@@ -653,25 +711,30 @@ async def list_events(ctx):
             events_list.append(event)
     
     if not events_list:
-        await ctx.send("AUCUNE PARTIE EN COURS.")
-        return
+        response = await ctx.send("AUCUNE PARTIE EN COURS.")
+    else:
+        description = ""
+        for event in events_list:
+            event_type = "CONCOURS" if event.get('type') == 'contest' else "EVENEMENT"
+            description += f"**{event_type} :** `{event['event_title'].upper()}`\n"
+            description += f"ID : `{event['message_id']}`\n"
+            description += f"DATE : {event['start_time'].strftime('%d/%m/%Y %H:%M')}\n"
+            description += "----------------------------------------\n"
+            
+        embed = discord.Embed(
+            title="LISTE DES PARTIES ACTIVES",
+            description=description,
+            color=discord.Color(0x6441a5) # Violet néon
+        )
+        # --- AJOUT DU GIF ---
+        embed.set_image(url=PIXEL_ART_GIF_URL)
+        response = await ctx.send(embed=embed)
     
-    description = ""
-    for event in events_list:
-        event_type = "CONCOURS" if event.get('type') == 'contest' else "EVENEMENT"
-        description += f"**{event_type} :** `{event['event_title'].upper()}`\n"
-        description += f"ID : `{event['message_id']}`\n"
-        description += f"DATE : {event['start_time'].strftime('%d/%m/%Y %H:%M')}\n"
-        description += "----------------------------------------\n"
-        
-    embed = discord.Embed(
-        title="LISTE DES PARTIES ACTIVES",
-        description=description,
-        color=discord.Color(0x6441a5) # Violet néon
-    )
-    # --- AJOUT DU GIF ---
-    embed.set_image(url=PIXEL_ART_GIF_URL)
-    await ctx.send(embed=embed)
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
 
 @bot.command(name='end_event')
 @commands.has_permissions(manage_roles=True)
@@ -679,6 +742,7 @@ async def end_event(ctx, event_id: str):
     """
     Termine manuellement un événement et supprime les rôles.
     """
+    print(f"Commande !end_event reçue de {ctx.author} pour l'ID {event_id}.")
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
@@ -708,7 +772,12 @@ async def end_event(ctx, event_id: str):
     # Supprime l'événement de la base de données
     doc_ref.delete()
     
-    await ctx.send(f"LA PARTIE AVEC L'ID `{event_id}` EST TERMINEE. ROLES RETIRES.")
+    response = await ctx.send(f"LA PARTIE AVEC L'ID `{event_id}` EST TERMINEE. ROLES RETIRES.")
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
 
 @bot.command(name='create_contest')
 @commands.has_permissions(manage_roles=True)
@@ -718,6 +787,7 @@ async def create_contest(ctx, deadline_date_str: str, deadline_time_str: str, pa
     Syntaxe: !create_contest <date_limite> <heure_limite> <limite_participants> <#salon_annonce> <titre_event> <prix>
     Exemple: !create_contest 2025-12-25 20:00 100 #annonces Gagnez un jeu! Jeu vidéo
     """
+    print(f"Commande !create_contest reçue de {ctx.author} avec les arguments: {ctx.args}")
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
@@ -769,7 +839,12 @@ async def create_contest(ctx, deadline_date_str: str, deadline_time_str: str, pa
     
     await announcement_channel.send(f"@everyone | NOUVEAU CONCOURS CREE : **{event_title.upper()}**\n**CLIQUEZ SUR LE BOUTON POUR PARTICIPER !**")
 
-    await ctx.send(f"CONCOURS LANCE ! ID DE L'EVENEMENT : `{event_message.id}`")
+    response = await ctx.send(f"CONCOURS LANCE ! ID DE L'EVENEMENT : `{event_message.id}`")
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
     
 @bot.command(name='raffle_event')
 @commands.has_permissions(manage_roles=True)
@@ -777,6 +852,7 @@ async def raffle_event(ctx, event_id: str):
     """
     Effectue un tirage au sort parmi les participants d'un événement ou d'un concours et annonce un gagnant.
     """
+    print(f"Commande !raffle_event reçue de {ctx.author} pour l'ID {event_id}.")
     if not db:
         await ctx.send("ERREUR SYSTEME : BASE DE DONNEES NON CONNECTEE.")
         return
@@ -801,9 +877,25 @@ async def raffle_event(ctx, event_id: str):
     # Met à jour le message pour indiquer le gagnant et le statut terminé
     await update_event_message(event_data, view_to_remove=True)
 
-    await ctx.send(f"FELICITATIONS A <@{winner_id}> POUR AVOIR GAGNE LA PARTIE `{event_data['event_title'].upper()}` ! ")
+    response = await ctx.send(f"FELICITATIONS A <@{winner_id}> POUR AVOIR GAGNE LA PARTIE `{event_data['event_title'].upper()}` ! ")
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
 
-# --- Tâche en boucle pour vérifier les événements ---
+@bot.command(name='test_permissions')
+@commands.has_permissions(manage_roles=True)
+async def test_permissions(ctx):
+    """Vérifie si l'utilisateur a les permissions requises pour les commandes d'événements."""
+    response = await ctx.send("FELICITATIONS ! VOUS AVEZ LES PERMISSIONS NECESSAIRES POUR UTILISER LES COMMANDES D'EVENEMENT.")
+    # Ajoute le message à la liste pour le nettoyage
+    messages_to_clean.append({
+        'message': response,
+        'delete_after': datetime.now() + timedelta(seconds=CLEANUP_DELAY_SECONDS)
+    })
+
+# --- Tâches en boucle ---
 @tasks.loop(seconds=30)
 async def update_events_loop():
     """Vérifie et met à jour l'état des événements toutes les 30 secondes."""
@@ -869,6 +961,23 @@ async def update_events_loop():
         event_data = doc.to_dict()
         event_id = doc.id
         await process_event(event_data, event_id)
+
+@tasks.loop(seconds=60) # Vérifie toutes les minutes
+async def cleanup_messages_loop():
+    """Supprime les messages obsolètes."""
+    now = datetime.now()
+    to_delete = []
+    for msg_info in messages_to_clean:
+        if now >= msg_info['delete_after']:
+            try:
+                await msg_info['message'].delete()
+            except discord.NotFound:
+                pass  # Le message a peut-être déjà été supprimé
+            to_delete.append(msg_info)
+    
+    # Supprime les messages de la liste après la suppression
+    for msg_info in to_delete:
+        messages_to_clean.remove(msg_info)
 
 # --- Exécution du bot ---
 if __name__ == '__main__':
