@@ -2,3 +2,4 @@ discord.py
 firebase-admin
 Flask
 gunicorn
+pytz
