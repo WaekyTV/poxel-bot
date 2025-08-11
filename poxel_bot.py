@@ -5,7 +5,6 @@ import asyncio
 from datetime import datetime, timedelta
 import pytz
 import random
-
 import discord
 from discord.ext import commands, tasks
 import firebase_admin
@@ -56,12 +55,12 @@ COMMANDS_HELP = {
     'create_event': {
         'description': "Crée un nouvel événement et ajoute des participants si nécessaire.",
         'syntax': "!create_event <heure_début> <durée> <@rôle> <#salon_annonce> <#salle_attente> <limite_participants> <nom_participants> <description>",
-        'example': "!create_event 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée Gaming!"
+        'example': "!create_event 20:00 2h30m @Participants #annonces #salle-attente 10 pixels Soirée Gaming!"
     },
     'create_event_plan': {
         'description': "Crée un événement planifié pour une date et une heure futures, et ajoute des participants si nécessaire.",
         'syntax': "!create_event_plan <date> <heure_début> <durée> <@rôle> <#salon_annonce> <#salle_attente> <limite_participants> <nom_participants> <description>",
-        'example': "!create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée de Noël"
+        'example': "!create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 pixels Soirée de Noël"
     },
     'list_events': {
         'description': "Affiche la liste de tous les événements actifs.",
@@ -227,24 +226,14 @@ async def update_event_message(event_data, view_to_remove=False):
     if event_data.get('type') == 'contest':
         embed_color = discord.Color(0x027afa)  # Bleu néon pour les concours
         embed_title = f"**NOUVEAU JEU ! CONCOURS :** {event_data['event_title'].upper()}"
-    else:
-        embed_color = discord.Color(0x6441a5)  # Violet pour les événements
-        embed_title = f"**NOUVELLE PARTIE ! EVENEMENT :** {event_data['event_title'].upper()}"
-    
-    embed = discord.Embed(
-        title=embed_title,
-        description="",
-        color=embed_color
-    )
-    
-    # --- AJOUT DU GIF ---
-    embed.set_image(url=PIXEL_ART_GIF_URL)
-    
-    # Logique pour les concours
-    if event_data.get('type') == 'contest':
-        embed.description = (
+        embed_description = (
             f"**PRIX :** {event_data.get('prize', 'NON SPECIFIE')}\n"
             f"CLIQUEZ SUR LE BOUTON POUR VOUS INSCRIRE !"
+        )
+        embed = discord.Embed(
+            title=embed_title,
+            description=embed_description,
+            color=embed_color
         )
         
         deadline_time = event_data['deadline_time'].replace(tzinfo=pytz.utc)
@@ -258,12 +247,21 @@ async def update_event_message(event_data, view_to_remove=False):
     else:
         start_time = event_data['start_time'].replace(tzinfo=pytz.utc)
         end_time = event_data['end_time'].replace(tzinfo=pytz.utc)
-        embed.description = (
+        
+        role = guild.get_role(int(event_data['role_id']))
+        waiting_room_channel = guild.get_channel(int(event_data['waiting_room_channel_id']))
+        
+        embed_description = (
             f"BIENVENUE JOUEUR !\n"
-            f"ROLE ATTRIBUE AU DEMARRAGE : <@&{event_data['role_id']}>\n"
-            f"POINT DE RALLIEMENT : <#{event_data['waiting_room_channel_id']}>\n"
+            f"ROLE ATTRIBUE AU DEMARRAGE : {role.mention}\n"
+            f"POINT DE RALLIEMENT : {waiting_room_channel.mention}\n"
             f"DEPLACEMENT AUTOMATIQUE A L'HEURE DE DEBUT !\n"
-            f"PARTICIPANTS REQUIS : {event_data.get('participant_group_name', 'NON SPECIFIE').upper()}"
+            f"PARTICIPANTS REQUIS : {event_data['participant_group_name'].upper()}"
+        )
+        embed = discord.Embed(
+            title=f"**NOUVELLE PARTIE ! EVENEMENT :** {event_data['event_title'].upper()}",
+            description=embed_description,
+            color=discord.Color(0x6441a5) # Violet
         )
     
         if now < start_time:
@@ -274,6 +272,8 @@ async def update_event_message(event_data, view_to_remove=False):
             embed.add_field(name="TERMINE IL Y A", value=format_timedelta(now - end_time), inline=True)
             embed.color = discord.Color.dark_grey()
         
+    embed.set_image(url=PIXEL_ART_GIF_URL)
+    
     embed.add_field(name="JOUEURS", value=f"{len(event_data['participants'])}/{event_data['participant_limit']}", inline=True)
     
     # Afficher la liste des participants avec leurs pseudos
@@ -290,6 +290,7 @@ async def update_event_message(event_data, view_to_remove=False):
     new_view = EventButtonsView(event_id=event_data['message_id'], event_data=event_data)
     
     await message.edit(embed=embed, view=new_view)
+
 
 # --- Classes pour les boutons interactifs et la modale ---
 
@@ -354,36 +355,18 @@ class GameNameModal(discord.ui.Modal):
 
 
 class EventButtonsView(discord.ui.View):
+    """
+    CORRECTION D'ERREUR MAJEURE : Les boutons sont maintenant créés une seule fois
+    grâce aux décorateurs @discord.ui.button et non plus avec self.add_item.
+    Cela résout l'erreur de "custom_id" dupliqué.
+    Les labels sont également correctement définis.
+    """
     def __init__(self, event_id: str, event_data: dict):
         super().__init__(timeout=None)
         self.event_id = event_id
         self.event_data = event_data
         
-        # Logique pour désactiver le bouton si l'inscription est fermée
-        is_full = len(event_data['participants']) >= event_data['participant_limit']
-        
-        # Les concours n'ont pas de rôle, on adapte donc le texte du bouton
-        button_label = "start" if not is_full else "COMPLET"
-
-        join_button = discord.ui.Button(
-            label=button_label,
-            style=discord.ButtonStyle.red if is_full else discord.ButtonStyle.green,
-            emoji="🕹️" if not is_full else "⛔",
-            custom_id="join_event",
-            disabled=is_full
-        )
-        self.add_item(join_button)
-        
-        leave_button = discord.ui.Button(
-            label="quit",
-            style=discord.ButtonStyle.red,
-            emoji="🚪",
-            custom_id="leave_event",
-            disabled=False
-        )
-        self.add_item(leave_button)
-
-    @discord.ui.button(custom_id="join_event")
+    @discord.ui.button(label="START", style=discord.ButtonStyle.green, emoji="🕹️", custom_id="join_event")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Callback pour le bouton 'Start' qui ouvre une modale."""
         member = interaction.user
@@ -414,7 +397,7 @@ class EventButtonsView(discord.ui.View):
 
         await update_event_message(data)
 
-    @discord.ui.button(custom_id="leave_event")
+    @discord.ui.button(label="QUIT", style=discord.ButtonStyle.red, emoji="🚪", custom_id="leave_event")
     async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Callback pour le bouton 'Quit'."""
         member = interaction.user
@@ -536,7 +519,7 @@ async def create_event(ctx, start_time_str: str, duration: str, role: discord.Ro
     """
     Crée un nouvel événement et ajoute des participants si nécessaire.
     Syntaxe: !create_event <heure_début> <durée_event> <@rôle> <#salon_annonce> <#salle_attente> <nombre_max_participants> <nom_des_participants> <description>
-    Exemple: !create_event 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée Gaming!
+    Exemple: !create_event 20:00 2h30m @Participants #annonces #salle-attente 10 pixels Soirée Gaming!
     """
     print(f"Commande !create_event reçue de {ctx.author} avec les arguments: {ctx.args}")
     if not db:
@@ -637,7 +620,7 @@ async def create_event(ctx, start_time_str: str, duration: str, role: discord.Ro
     doc_ref.set(event_data)
     
     # Envoi le message à @everyone après la création de l'événement
-    await announcement_channel.send(f"@everyone | NOUVEL EVENEMENT CREE : **{event_title.upper()}**\n**CLIQUEZ SUR LE BOUTON POUR start !**")
+    await announcement_channel.send(f"@everyone | NOUVEL EVENEMENT CREE : **{event_title.upper()}**\n**CLIQUEZ SUR LE BOUTON POUR START !**")
     
     response = await ctx.send(f"PARTIE LANCEE ! ID DE L'EVENEMENT : `{event_message.id}`")
     # Ajoute le message à la liste pour le nettoyage
@@ -652,7 +635,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
     """
     Crée un événement planifié pour une date et une heure futures, et ajoute des participants si nécessaire.
     Syntaxe: !create_event_plan <date> <heure_début> <durée> <@rôle> <#salon_annonce> <#salle_attente> <limite_participants> <nom_participants> <description>
-    Exemple: !create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 10 pixels Soirée de Noël
+    Exemple: !create_event_plan 2025-12-25 20:00 2h30m @Participants #annonces #salle-attente 10 pixels Soirée de Noël
     """
     print(f"Commande !create_event_plan reçue de {ctx.author} avec les arguments: {ctx.args}")
     if not db:
@@ -751,7 +734,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
     doc_ref = db.collection('events').document(str(event_message.id))
     doc_ref.set(event_data)
 
-    await announcement_channel.send(f"@everyone | NOUVEL EVENEMENT PLANIFIE : **{event_title.upper()}**\n**CLIQUEZ SUR LE BOUTON POUR start !**")
+    await announcement_channel.send(f"@everyone | NOUVEL EVENEMENT PLANIFIE : **{event_title.upper()}**\n**CLIQUEZ SUR LE BOUTON POUR START !**")
     
     response = await ctx.send(f"PARTIE PLANIFIEE ! ID DE L'EVENEMENT : `{event_message.id}`")
     # Ajoute le message à la liste pour le nettoyage
@@ -764,7 +747,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration: s
 @commands.has_permissions(manage_roles=True)
 async def list_events(ctx):
     """
-    Affiche la liste de tous les événements actifs avec leurs IDs.
+    Affiche la liste de tous les événements actifs (non terminés) avec leurs IDs.
     """
     print(f"Commande !list_events reçue de {ctx.author}.")
     if not db:
@@ -773,31 +756,41 @@ async def list_events(ctx):
         
     docs = db.collection('events').stream()
     
+    # Crée une liste d'événements actifs
     events_list = []
+    now = datetime.now(pytz.utc)
     for doc in docs:
         event = doc.to_dict()
-        if datetime.now(pytz.utc) < event['end_time'].replace(tzinfo=pytz.utc):
+        # Un événement est considéré actif s'il n'est pas encore terminé
+        if event.get('type') == 'contest':
+            if now < event['deadline_time'].replace(tzinfo=pytz.utc):
+                events_list.append(event)
+        elif now < event['end_time'].replace(tzinfo=pytz.utc):
             events_list.append(event)
     
     if not events_list:
-        response = await ctx.send("AUCUNE PARTIE EN COURS.")
-    else:
-        description = ""
-        for event in events_list:
-            event_type = "CONCOURS" if event.get('type') == 'contest' else "EVENEMENT"
-            description += f"**{event_type} :** `{event['event_title'].upper()}`\n"
-            description += f"ID : `{event['message_id']}`\n"
-            description += f"DATE : {event['start_time'].strftime('%d/%m/%Y %H:%M')}\n"
-            description += "----------------------------------------\n"
-            
-        embed = discord.Embed(
-            title="LISTE DES PARTIES ACTIVES",
-            description=description,
-            color=discord.Color(0x6441a5) # Violet néon
-        )
-        # --- AJOUT DU GIF ---
-        embed.set_image(url=PIXEL_ART_GIF_URL)
-        response = await ctx.send(embed=embed)
+        await ctx.send("AUCUNE PARTIE EN COURS.")
+        return
+        
+    description = ""
+    for event in events_list:
+        event_type = "CONCOURS" if event.get('type') == 'contest' else "EVENEMENT"
+        description += f"**{event_type} :** `{event['event_title'].upper()}`\n"
+        description += f"ID : `{event['message_id']}`\n"
+        if event_type == "CONCOURS":
+            description += f"DATE LIMITE : {event['deadline_time'].strftime('%d/%m/%Y %H:%M')}\n"
+        else:
+            description += f"DATE DE DEBUT : {event['start_time'].strftime('%d/%m/%Y %H:%M')}\n"
+        description += "----------------------------------------\n"
+        
+    embed = discord.Embed(
+        title="LISTE DES PARTIES ACTIVES",
+        description=description,
+        color=discord.Color(0x6441a5) # Violet néon
+    )
+    # --- AJOUT DU GIF ---
+    embed.set_image(url=PIXEL_ART_GIF_URL)
+    response = await ctx.send(embed=embed)
     
     # Ajoute le message à la liste pour le nettoyage
     messages_to_clean.append({
@@ -1028,7 +1021,8 @@ async def update_events_loop():
             # Fin de l'événement
             if now >= end_time:
                 # Retire le rôle et supprime l'événement de la BDD
-                role = guild.get_role(int(event_data['role_id']))
+                role = guild.get_role(int(event_data['role_id'])
+                )
                 if role:
                     for user_id in event_data['participants']:
                         member = guild.get_member(int(user_id))
@@ -1074,24 +1068,27 @@ async def cleanup_messages_loop():
         messages_to_clean.remove(msg_info)
 
 # --- Exécution du bot ---
-if __name__ == '__main__':
-    # Initialise le serveur web sur un thread séparé
-    def run_flask():
-        app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000))
-        
-    async def main():
-        # Démarre le serveur Flask
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, run_flask)
-        
-        # Démarre le bot
-        token = os.environ.get('DISCORD_BOT_TOKEN')
-        if not token:
-            print("Erreur: Le token du bot Discord 'DISCORD_BOT_TOKEN' n'est pas défini.")
-        else:
-            await bot.start(token)
+# L'exécution principale pour Render (ou tout autre service d'hébergement web)
+def run_flask():
+    """Démarre le serveur Flask sur un thread séparé."""
+    app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000))
+    
+async def main():
+    """Fonction principale pour exécuter le bot et le serveur web."""
+    # Démarre le serveur Flask dans un thread séparé pour ne pas bloquer le bot
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, run_flask)
+    
+    # Obtient le token du bot depuis les variables d'environnement
+    token = os.environ.get('DISCORD_BOT_TOKEN')
+    if not token:
+        print("Erreur: Le token du bot Discord 'DISCORD_BOT_TOKEN' n'est pas défini.")
+    else:
+        # Démarre le bot Discord
+        await bot.start(token)
             
-    # Lance le bot
+if __name__ == '__main__':
+    # Lance le bot et le serveur Flask
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
