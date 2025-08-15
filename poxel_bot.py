@@ -433,4 +433,153 @@ class EventManager(commands.Cog):
             for command in self.bot.commands:
                 if not command.hidden:
                     embed.add_field(name=f"`!{command.name}`", value=command.help or "Pas de description.", inline=True)
-            msg = await ctx.send(embed=embed, delet
+            msg = await ctx.send(embed=embed, delete_after=120)
+    
+    @commands.command(name='check_admin_rights', help="Vérifie si vous avez les droits d'administration sur le bot.")
+    @commands.has_permissions(administrator=True)
+    async def check_admin_rights(self, ctx):
+        """Vérifie si l'utilisateur a les droits d'administration."""
+        msg = await ctx.send("Vous avez les droits d'administration sur Poxel.", delete_after=120)
+        await ctx.message.delete()
+
+    @check_admin_rights.error
+    async def check_admin_rights_error(self, ctx, error):
+        """Gère l'erreur de permission pour la commande de vérification."""
+        if isinstance(error, commands.MissingPermissions):
+            msg = await ctx.send("Vous n'avez pas les droits d'administration pour utiliser Poxel.", delete_after=120)
+            await ctx.message.delete()
+
+    async def end_event_process(self, event_data):
+        """Processus de fin d'événement."""
+        event_name = event_data['name']
+        role_id = event_data['role_id']
+        participants = event_data['participants']
+        message_id = event_data['message_id']
+        announcement_channel_id = event_data['announcement_channel']
+        
+        announcement_channel = self.bot.get_channel(announcement_channel_id)
+        if not announcement_channel:
+            return
+        
+        # Retirer le rôle à tous les participants
+        role = announcement_channel.guild.get_role(role_id)
+        if role:
+            for user_id in participants.keys():
+                member = announcement_channel.guild.get_member(int(user_id))
+                if member:
+                    try:
+                        await member.remove_roles(role)
+                    except HTTPException:
+                        pass # Gérer si le bot n'a pas les droits
+        
+        # Supprimer le message d'embed
+        try:
+            message_to_delete = await announcement_channel.fetch_message(message_id)
+            await message_to_delete.delete()
+        except (HTTPException, NotFound):
+            pass
+
+        # Annonce de fin d'événement
+        await announcement_channel.send(f"@everyone L'événement **'{event_name}'** est terminé. Merci à tous les participants !")
+
+        # Supprimer l'événement de la base de données
+        await db.collection('events').document(event_name).delete()
+
+
+    # Tâche en arrière-plan pour gérer les événements en temps réel
+    @tasks.loop(seconds=15)
+    async def event_checker(self):
+        """Vérifie l'état de tous les événements actifs et planifiés."""
+        docs = db.collection('events').where('status', 'in', ['created', 'started']).stream()
+        now = datetime.now()
+        
+        async for doc in docs:
+            event_data = doc.to_dict()
+            event_name = doc.id
+            start_time = datetime.fromisoformat(event_data['start_time'])
+            duration_minutes = event_data['duration_minutes']
+            end_time = start_time + timedelta(minutes=duration_minutes)
+            
+            message_id = event_data.get('message_id')
+            announcement_channel_id = event_data.get('announcement_channel')
+            if not message_id or not announcement_channel_id:
+                continue
+
+            announcement_channel = self.bot.get_channel(announcement_channel_id)
+            if not announcement_channel:
+                continue
+            
+            try:
+                event_message = await announcement_channel.fetch_message(message_id)
+                # Met à jour l'embed en temps réel
+                await self.update_event_embed(event_data, event_message)
+            except (HTTPException, NotFound):
+                # Le message a peut-être été supprimé, on le recrée
+                # Pour éviter cela, l'embed ne devrait être supprimé qu'à la fin
+                pass
+
+            # Gestion des phases d'événement
+            if event_data['status'] == 'created':
+                # Rappel 30 minutes avant
+                if start_time - now <= timedelta(minutes=30) and 'reminded_30' not in event_data:
+                    await announcement_channel.send(f"@everyone Rappel : l'événement **'{event_name}'** démarre dans moins de 30 minutes. Dernières inscriptions !")
+                    event_data['reminded_30'] = True
+                    db.collection('events').document(event_name).set(event_data)
+                
+                # Début de l'événement
+                if now >= start_time:
+                    event_data['status'] = 'started'
+                    db.collection('events').document(event_name).set(event_data)
+                    
+                    role = announcement_channel.guild.get_role(event_data['role_id'])
+                    participants = event_data['participants']
+                    
+                    # Attribution des rôles et envoi des DMs
+                    for user_id in participants.keys():
+                        member = announcement_channel.guild.get_member(int(user_id))
+                        if member and role:
+                            try:
+                                await member.add_roles(role)
+                                await member.send(f"Félicitations, vous êtes inscrit à l'événement '{event_name}' ! Le rôle '{role.name}' vous a été attribué. Rendez-vous dans le salon {announcement_channel.guild.get_channel(event_data['waiting_room_channel']).mention} pour commencer.")
+                            except HTTPException:
+                                pass
+
+                    # Annonce du début de l'événement
+                    await announcement_channel.send(f"@everyone L'événement **'{event_name}'** a commencé ! Rendez-vous dans le salon <#{event_data['waiting_room_channel']}>.")
+                    # L'embed ne sera pas supprimé ici, il se mettra à jour pour afficher le temps restant avant la fin.
+
+            elif event_data['status'] == 'started' and now >= end_time:
+                # Fin de l'événement
+                event_data['status'] = 'ended'
+                db.collection('events').document(event_name).set(event_data)
+                await self.end_event_process(event_data)
+
+    # Tâche en arrière-plan pour gérer les concours
+    @tasks.loop(minutes=10)
+    async def contest_checker(self):
+        """Vérifie la fin des concours et effectue les tirages."""
+        # Logique pour les concours
+        pass # À implémenter
+
+    @event_checker.before_loop
+    async def before_event_checker(self):
+        await self.bot.wait_until_ready()
+
+@bot.event
+async def on_ready():
+    print(f'Connecté en tant que {bot.user.name}')
+    await bot.add_cog(EventManager(bot))
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("Vous n'avez pas la permission d'utiliser cette commande.", delete_after=120)
+    else:
+        print(f"Erreur de commande : {error}")
+        await ctx.send(f"Une erreur est survenue : {error}", delete_after=120)
+
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)
+
