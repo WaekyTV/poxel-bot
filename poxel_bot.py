@@ -47,7 +47,7 @@ def run_flask_app():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = discord.Bot(intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Base de données en mémoire pour les événements. Simule le stockage Firebase.
 events = {}
