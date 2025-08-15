@@ -1,5 +1,6 @@
 discord.py
 firebase-admin
-flask
 gunicorn
 pytz
+discord.py>=2.0.0
+Flask
