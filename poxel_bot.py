@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import firebase_admin
 from firebase_admin import credentials, firestore
 from discord.ui import Button, View, Modal, InputText
+from flask import Flask
+import threading
 
 # --- Configuration et Initialisation ---
 # Vous devez remplacer ces valeurs par les vôtres.
@@ -15,6 +17,20 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "VOTRE_TOKEN_ICI")
 FIREBASE_CREDENTIALS_PATH = "path/to/votre_firebase_credentials.json"
 # Le GIF pour l'embed rétro.
 RETRO_GIF_URL = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExM3h2aDVkYnF5M3Q3em5tMTh6bTlwZm56d3QyM3gyY29sOGE5ZnN1MyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/3ornjQM7zD1yI2B7eY/giphy.gif"
+
+# Initialisation de Flask
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    """Route de base pour le health check de Render."""
+    return "Poxel est en ligne et fonctionne !"
+
+# Fonction pour exécuter l'application Flask
+def run_flask_app():
+    port = int(os.getenv("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+    print(f"Flask server running on port {port}")
 
 # Initialisation de Firebase (commenté pour un fonctionnement sans Firebase, mais vous devrez le décommenter)
 # try:
@@ -356,6 +372,10 @@ async def helpoxel(ctx, commande: str = None):
         # Vous pouvez ajouter d'autres commandes ici
         await ctx.send(embed=embed, ephemeral=True)
 
+# Lancer l'application Flask dans un thread séparé
+flask_thread = threading.Thread(target=run_flask_app)
+flask_thread.daemon = True # Le thread se termine lorsque le programme principal se termine
+flask_thread.start()
 
 # Exécuter le bot
 # Assurez-vous que le token est correctement configuré.
