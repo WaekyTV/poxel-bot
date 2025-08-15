@@ -48,6 +48,10 @@ GIF_URL = os.getenv('GIF_URL', 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjE
 
 # Initialisation de Firebase
 try:
+    if FIREBASE_CREDENTIALS_JSON_STRING is None:
+        print("Erreur d'initialisation de Firebase : La variable d'environnement 'FIREBASE_CREDENTIALS' est manquante ou vide.")
+        exit()
+
     if not firebase_admin._apps:
         # CORRECTION ICI : On parse la chaîne JSON en un dictionnaire.
         cred = credentials.Certificate(json.loads(FIREBASE_CREDENTIALS_JSON_STRING))
@@ -582,4 +586,3 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
-
