@@ -89,7 +89,7 @@ class EventModal(ui.Modal, title="Inscription à l'événement"):
         await interaction.response.send_message(f"Inscription réussie, {interaction.user.mention} ! Votre pseudo en jeu est `{pseudo}`.", ephemeral=True, delete_after=120)
 
         # Mise à jour de la base de données
-        await doc_ref.set(self.event_data)
+        doc_ref.set(self.event_data)
 
         # Met à jour l'embed de l'événement
         await self.bot.get_cog("EventManager").update_event_embed(self.event_data, self.event_message)
@@ -144,7 +144,7 @@ class EventButtons(ui.View):
         # Supprime le participant
         del self.event_data['participants'][user_id]
         doc_ref = db.collection('events').document(self.event_name)
-        await doc_ref.set(self.event_data)
+        doc_ref.set(self.event_data)
         
         await interaction.response.send_message("Vous vous êtes désinscrit de l'événement.", ephemeral=True, delete_after=120)
         
@@ -240,6 +240,10 @@ class EventManager(commands.Cog):
         try:
             now = datetime.now(tz=None)
             today_date = now.strftime('%Y-%m-%d')
+            
+            # Correction pour gérer les formats d'heure différents (h ou :)
+            start_time_str = start_time_str.replace(':', 'h')
+            
             full_start_time_str = f"{today_date} {start_time_str}"
             start_time = datetime.strptime(full_start_time_str, '%Y-%m-%d %Hh%M')
             
@@ -248,7 +252,8 @@ class EventManager(commands.Cog):
                 return
 
             event_ref = db.collection('events').document(event_name)
-            event_doc = await event_ref.get()
+            # CORRECTION ICI : on retire await
+            event_doc = event_ref.get()
             if event_doc.exists:
                 await ctx.send(f"Un événement avec le nom '{event_name}' existe déjà.", delete_after=120)
                 return
@@ -274,7 +279,7 @@ class EventManager(commands.Cog):
             announcement_msg = await announcement_channel.send("@everyone", embed=embed, view=view)
             event_data['message_id'] = announcement_msg.id
             
-            await event_ref.set(event_data)
+            event_ref.set(event_data)
             await ctx.send(f"L'événement '{event_name}' a été créé et annoncé. ", delete_after=120)
             await ctx.message.delete()
         except Exception as e:
@@ -287,6 +292,9 @@ class EventManager(commands.Cog):
         # Logique similaire à create_event, mais avec une gestion de date
         # Ici, j'ai simplifié, mais une gestion robuste des dates est nécessaire (ex: dateutil)
         try:
+            # Correction pour gérer les formats d'heure différents (h ou :)
+            start_time_str = start_time_str.replace(':', 'h')
+
             full_start_time_str = f"{date_str} {start_time_str}"
             start_time = datetime.strptime(full_start_time_str, '%Y-%m-%d %Hh%M')
             now = datetime.now()
@@ -296,7 +304,8 @@ class EventManager(commands.Cog):
                 return
             
             event_ref = db.collection('events').document(event_name)
-            event_doc = await event_ref.get()
+            # CORRECTION ICI : on retire await
+            event_doc = event_ref.get()
             if event_doc.exists:
                 await ctx.send(f"Un événement avec le nom '{event_name}' existe déjà.", delete_after=120)
                 return
@@ -322,7 +331,7 @@ class EventManager(commands.Cog):
             announcement_msg = await announcement_channel.send("@everyone", embed=embed, view=view)
             event_data['message_id'] = announcement_msg.id
             
-            await event_ref.set(event_data)
+            event_ref.set(event_data)
             await ctx.send(f"L'événement '{event_name}' a été planifié pour le {start_time.strftime('%Y-%m-%d')}.", delete_after=120)
             await ctx.message.delete()
         except Exception as e:
@@ -333,7 +342,8 @@ class EventManager(commands.Cog):
     async def end_event(self, ctx, *, event_name: str):
         """Termine un événement manuellement."""
         doc_ref = db.collection('events').document(event_name)
-        doc = await doc_ref.get()
+        # CORRECTION ICI : on retire await
+        doc = doc_ref.get()
         
         if not doc.exists:
             await ctx.send(f"L'événement '{event_name}' n'existe pas.", delete_after=120)
@@ -341,7 +351,7 @@ class EventManager(commands.Cog):
 
         event_data = doc.to_dict()
         event_data['status'] = 'ended'
-        await doc_ref.set(event_data)
+        doc_ref.set(event_data)
         
         # Logique de fin d'événement (suppression de rôles, etc.)
         await self.end_event_process(event_data)
@@ -353,7 +363,8 @@ class EventManager(commands.Cog):
     async def tirage(self, ctx, *, event_name: str):
         """Effectue un tirage au sort parmi les participants d'un événement."""
         doc_ref = db.collection('events').document(event_name)
-        doc = await doc_ref.get()
+        # CORRECTION ICI : on retire await
+        doc = doc_ref.get()
         
         if not doc.exists:
             await ctx.send(f"L'événement '{event_name}' n'existe pas.", delete_after=120)
@@ -390,7 +401,8 @@ class EventManager(commands.Cog):
                 return
 
             contest_ref = db.collection('contests').document(contest_name)
-            contest_doc = await contest_ref.get()
+            # CORRECTION ICI : on retire await
+            contest_doc = contest_ref.get()
             if contest_doc.exists:
                 await ctx.send(f"Un concours avec le nom '{contest_name}' existe déjà.", delete_after=120)
                 return
@@ -405,7 +417,7 @@ class EventManager(commands.Cog):
             # TODO: Implémenter l'ajout de participants au concours
             # Pour l'instant, le bot va juste annoncer le concours.
             
-            await contest_ref.set(contest_data)
+            contest_ref.set(contest_data)
             await ctx.send(f"@everyone Un nouveau concours a été créé : **'{contest_name}'** ! Fin des inscriptions le **{end_date.strftime('%Y-%m-%d')}**.")
             await ctx.message.delete()
 
