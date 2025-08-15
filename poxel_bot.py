@@ -415,7 +415,6 @@ class EventManager(commands.Cog):
         if command_name:
             command = self.bot.get_command(command_name)
             if not command:
-                # Correction possible: s'assurer que delete_after est bien dans les parenthèses
                 msg = await ctx.send(f"La commande '{command_name}' n'existe pas.", delete_after=120)
             else:
                 embed = Embed(
@@ -433,4 +432,5 @@ class EventManager(commands.Cog):
             )
             for command in self.bot.commands:
                 if not command.hidden:
-                    embed.add_field(name=f"`!{command.name}`", value=command
+                    embed.add_field(name=f"`!{command.name}`", value=command.help or "Pas de description.", inline=True)
+            msg = await ctx.send(embed=embed, delet
