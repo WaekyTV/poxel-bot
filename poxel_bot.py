@@ -2,8 +2,9 @@
 import os
 import asyncio
 import json
-from datetime import datetime, timedelta
 import random
+import time
+from datetime import datetime, timedelta
 
 import discord
 from discord.ext import commands, tasks
@@ -37,11 +38,6 @@ flask_thread = Thread(target=run_flask_server)
 flask_thread.start()
 
 # Variables d'environnement
-# Assurez-vous d'avoir un fichier .env ou de configurer vos variables d'environnement sur Render.
-# DISCORD_TOKEN = Votre token Discord
-# FIREBASE_CREDENTIALS = La clé JSON de votre compte de service Firebase
-# GIF_URL = URL d'un GIF rétro pour les embeds
-# Pour des raisons de sécurité, nous lisons les clés depuis l'environnement.
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 FIREBASE_CREDENTIALS_JSON_STRING = os.getenv('FIREBASE_CREDENTIALS')
 GIF_URL = os.getenv('GIF_URL', 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExYzFlajVsaHgyd2l0YXc5NWdwN3Z5a201M2ZlMGZkYWJjb3F3ZzVtNiZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/LvtL8l1i0qR0B9bC2E/giphy.gif') # Exemple de GIF rétro
@@ -53,7 +49,7 @@ try:
         exit()
 
     if not firebase_admin._apps:
-        # CORRECTION ICI : On parse la chaîne JSON en un dictionnaire.
+        # On parse la chaîne JSON en un dictionnaire pour l'utiliser comme credentials
         cred = credentials.Certificate(json.loads(FIREBASE_CREDENTIALS_JSON_STRING))
         firebase_admin.initialize_app(cred)
     db = firestore.client()
@@ -86,10 +82,10 @@ class EventModal(ui.Modal, title="Inscription à l'événement"):
         # Ajoute le participant à la liste
         self.event_data['participants'][user_id] = pseudo
         doc_ref = db.collection('events').document(self.event_name)
-        await interaction.response.send_message(f"Inscription réussie, {interaction.user.mention} ! Votre pseudo en jeu est `{pseudo}`.", ephemeral=True, delete_after=120)
-
-        # Mise à jour de la base de données
+        # Utilisation de set() sans await car l'opération est synchrone
         doc_ref.set(self.event_data)
+
+        await interaction.response.send_message(f"Inscription réussie, {interaction.user.mention} ! Votre pseudo en jeu est `{pseudo}`.", ephemeral=True, delete_after=120)
 
         # Met à jour l'embed de l'événement
         await self.bot.get_cog("EventManager").update_event_embed(self.event_data, self.event_message)
@@ -144,6 +140,7 @@ class EventButtons(ui.View):
         # Supprime le participant
         del self.event_data['participants'][user_id]
         doc_ref = db.collection('events').document(self.event_name)
+        # Utilisation de set() sans await car l'opération est synchrone
         doc_ref.set(self.event_data)
         
         await interaction.response.send_message("Vous vous êtes désinscrit de l'événement.", ephemeral=True, delete_after=120)
@@ -158,7 +155,6 @@ class EventManager(commands.Cog):
     """Cog principal pour la gestion des événements et des concours."""
     def __init__(self, bot):
         self.bot = bot
-        self.active_events = {}  # Cache en mémoire des événements actifs
         self.event_checker.start()
         self.contest_checker.start()
         
@@ -185,15 +181,33 @@ class EventManager(commands.Cog):
         # Calcul du temps restant
         if status == 'created' and now < start_time:
             time_left = start_time - now
-            time_string = f"Démarre dans {time_left.days}j {time_left.seconds // 3600}h {(time_left.seconds % 3600) // 60}m {time_left.seconds % 60}s"
+            if time_left.total_seconds() > 0:
+                days = time_left.days
+                hours = time_left.seconds // 3600
+                minutes = (time_left.seconds % 3600) // 60
+                seconds = time_left.seconds % 60
+                time_string = f"Démarre dans {days}j {hours}h {minutes}m {seconds}s"
+            else:
+                time_string = "DÉMARRE MAINTENANT !"
             color = 0x6441a5
         elif status == 'started' and now < end_time:
             time_left = end_time - now
-            time_string = f"Fini dans {time_left.days}j {time_left.seconds // 3600}h {(time_left.seconds % 3600) // 60}m {time_left.seconds % 60}s"
+            if time_left.total_seconds() > 0:
+                days = time_left.days
+                hours = time_left.seconds // 3600
+                minutes = (time_left.seconds % 3600) // 60
+                seconds = time_left.seconds % 60
+                time_string = f"Fini dans {days}j {hours}h {minutes}m {seconds}s"
+            else:
+                time_string = "SE TERMINE BIENTÔT !"
             color = 0x027afa
         elif status == 'ended':
             time_since_end = now - end_time
-            time_string = f"FINI IL Y A {time_since_end.days}j {time_since_end.seconds // 3600}h {(time_since_end.seconds % 3600) // 60}m {time_since_end.seconds % 60}s"
+            days = time_since_end.days
+            hours = time_since_end.seconds // 3600
+            minutes = (time_since_end.seconds % 3600) // 60
+            seconds = time_since_end.seconds % 60
+            time_string = f"FINI IL Y A {days}j {hours}h {minutes}m {seconds}s"
             color = 0x808080
         else:
             time_string = "Statut indéfini"
@@ -233,7 +247,7 @@ class EventManager(commands.Cog):
         except (HTTPException, NotFound) as e:
             print(f"Impossible de mettre à jour l'embed de l'événement {event_data['name']}: {e}")
 
-    @commands.command(name='create_event', help="Crée un événement pour le jour même.")
+    @commands.command(name='create_event', help="Crée un événement pour le jour même. Ex: `!create_event 21h14 10min @role #salon #annonce 1 participants_vide soirée gaming`")
     @commands.has_permissions(administrator=True)
     async def create_event(self, ctx, start_time_str, duration_str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, max_participants: int, event_participants: str, *, event_name: str):
         """Crée un événement pour le jour même."""
@@ -252,10 +266,9 @@ class EventManager(commands.Cog):
                 return
 
             event_ref = db.collection('events').document(event_name)
-            # CORRECTION ICI : on retire await
             event_doc = event_ref.get()
             if event_doc.exists:
-                await ctx.send(f"Un événement avec le nom '{event_name}' existe déjà.", delete_after=120)
+                await ctx.send(f"Un événement avec le nom '{event_name}' existe déjà. Il doit être terminé avant d'en créer un autre avec le même nom.", delete_after=120)
                 return
 
             duration_minutes = int(duration_str.replace('min', '').replace('h', '')) # Simple parsing
@@ -279,18 +292,17 @@ class EventManager(commands.Cog):
             announcement_msg = await announcement_channel.send("@everyone", embed=embed, view=view)
             event_data['message_id'] = announcement_msg.id
             
+            # Utilisation de set() sans await car l'opération est synchrone
             event_ref.set(event_data)
             await ctx.send(f"L'événement '{event_name}' a été créé et annoncé. ", delete_after=120)
             await ctx.message.delete()
         except Exception as e:
             await ctx.send(f"Erreur lors de la création de l'événement : {e}", delete_after=120)
 
-    @commands.command(name='create_event_plan', help="Planifie un événement pour une date future.")
+    @commands.command(name='create_event_plan', help="Planifie un événement pour une date future. Ex: `!create_event_plan 2025-08-20 18h30 30min @role #salon #annonce 1 participants_vide soirée gaming`")
     @commands.has_permissions(administrator=True)
     async def create_event_plan(self, ctx, date_str, start_time_str, duration_str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_room_channel: discord.TextChannel, max_participants: int, event_participants: str, *, event_name: str):
         """Planifie un événement pour une date future."""
-        # Logique similaire à create_event, mais avec une gestion de date
-        # Ici, j'ai simplifié, mais une gestion robuste des dates est nécessaire (ex: dateutil)
         try:
             # Correction pour gérer les formats d'heure différents (h ou :)
             start_time_str = start_time_str.replace(':', 'h')
@@ -304,10 +316,9 @@ class EventManager(commands.Cog):
                 return
             
             event_ref = db.collection('events').document(event_name)
-            # CORRECTION ICI : on retire await
             event_doc = event_ref.get()
             if event_doc.exists:
-                await ctx.send(f"Un événement avec le nom '{event_name}' existe déjà.", delete_after=120)
+                await ctx.send(f"Un événement avec le nom '{event_name}' existe déjà. Il doit être terminé avant d'en créer un autre avec le même nom.", delete_after=120)
                 return
             
             duration_minutes = int(duration_str.replace('min', '').replace('h', ''))
@@ -322,7 +333,8 @@ class EventManager(commands.Cog):
                 'max_participants': max_participants,
                 'participants': {},
                 'status': 'created',
-                'message_id': None
+                'message_id': None,
+                'reminded_morning': False # Nouvel indicateur pour le rappel matinal
             }
             
             embed = await self.get_event_embed(event_data)
@@ -331,18 +343,18 @@ class EventManager(commands.Cog):
             announcement_msg = await announcement_channel.send("@everyone", embed=embed, view=view)
             event_data['message_id'] = announcement_msg.id
             
+            # Utilisation de set() sans await car l'opération est synchrone
             event_ref.set(event_data)
             await ctx.send(f"L'événement '{event_name}' a été planifié pour le {start_time.strftime('%Y-%m-%d')}.", delete_after=120)
             await ctx.message.delete()
         except Exception as e:
             await ctx.send(f"Erreur lors de la planification de l'événement : {e}", delete_after=120)
 
-    @commands.command(name='end_event', help="Termine un événement manuellement.")
+    @commands.command(name='end_event', help="Termine un événement manuellement. Ex: `!end_event soirée gaming`")
     @commands.has_permissions(administrator=True)
     async def end_event(self, ctx, *, event_name: str):
         """Termine un événement manuellement."""
         doc_ref = db.collection('events').document(event_name)
-        # CORRECTION ICI : on retire await
         doc = doc_ref.get()
         
         if not doc.exists:
@@ -353,17 +365,38 @@ class EventManager(commands.Cog):
         event_data['status'] = 'ended'
         doc_ref.set(event_data)
         
-        # Logique de fin d'événement (suppression de rôles, etc.)
         await self.end_event_process(event_data)
         await ctx.send(f"L'événement '{event_name}' a été terminé manuellement.", delete_after=120)
         await ctx.message.delete()
 
-    @commands.command(name='tirage', help="Effectue un tirage au sort parmi les participants.")
+    @commands.command(name='list_events', help="Affiche la liste de tous les événements en cours ou à venir.")
+    async def list_events(self, ctx):
+        """Affiche la liste des événements."""
+        docs = db.collection('events').where('status', 'in', ['created', 'started']).stream()
+        events_list = []
+        async for doc in docs:
+            event_data = doc.to_dict()
+            start_time = datetime.fromisoformat(event_data['start_time'])
+            events_list.append(f"- **{event_data['name']}** : démarre le `{start_time.strftime('%Y-%m-%d à %H:%M')}`")
+        
+        if not events_list:
+            description = "Aucun événement en cours ou à venir pour le moment."
+        else:
+            description = "\n".join(events_list)
+
+        embed = Embed(
+            title="EVENTS ACTIFS",
+            description=description,
+            color=0x027afa
+        )
+        await ctx.send(embed=embed, delete_after=120)
+        await ctx.message.delete()
+
+    @commands.command(name='tirage', help="Effectue un tirage au sort parmi les participants. Ex: `!tirage soirée gaming`")
     @commands.has_permissions(administrator=True)
     async def tirage(self, ctx, *, event_name: str):
         """Effectue un tirage au sort parmi les participants d'un événement."""
         doc_ref = db.collection('events').document(event_name)
-        # CORRECTION ICI : on retire await
         doc = doc_ref.get()
         
         if not doc.exists:
@@ -388,11 +421,15 @@ class EventManager(commands.Cog):
         await ctx.send(embed=embed)
         await ctx.message.delete()
 
-    @commands.command(name='concours', help="Crée un concours.")
+    @commands.command(name='concours', help="Crée un concours. Ex: `!concours Mon Super Concours 2025-09-01`")
     @commands.has_permissions(administrator=True)
-    async def concours(self, ctx, end_date_str, *, contest_name: str):
-        """Crée un concours avec une date de fin et effectue un tirage au sort."""
+    async def concours(self, ctx, *, args: str):
+        """Crée un concours avec une date de fin."""
         try:
+            split_args = args.rsplit(' ', 1)
+            contest_name = split_args[0]
+            end_date_str = split_args[1]
+            
             end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
             now = datetime.now()
 
@@ -401,7 +438,6 @@ class EventManager(commands.Cog):
                 return
 
             contest_ref = db.collection('contests').document(contest_name)
-            # CORRECTION ICI : on retire await
             contest_doc = contest_ref.get()
             if contest_doc.exists:
                 await ctx.send(f"Un concours avec le nom '{contest_name}' existe déjà.", delete_after=120)
@@ -410,21 +446,56 @@ class EventManager(commands.Cog):
             contest_data = {
                 'name': contest_name,
                 'end_date': end_date.isoformat(),
-                'participants': [],
-                'status': 'created'
+                'participants': {},
+                'status': 'created',
+                'channel_id': ctx.channel.id
             }
-
-            # TODO: Implémenter l'ajout de participants au concours
-            # Pour l'instant, le bot va juste annoncer le concours.
             
+            embed = Embed(
+                title=f"🏆 NOUVEAU CONCOURS : {contest_name} 🏆",
+                description=f"Un nouveau concours a été lancé ! Participez en cliquant sur le bouton ci-dessous.\n\n"
+                            f"Fin des inscriptions le **{end_date.strftime('%Y-%m-%d')}**.",
+                color=0x6441a5
+            )
+            
+            view = ui.View()
+            view.add_item(ui.Button(label="Participer", style=ButtonStyle.green, custom_id=f"join_contest_{contest_name}"))
+            
+            announcement_msg = await ctx.send("@everyone", embed=embed, view=view)
+            contest_data['message_id'] = announcement_msg.id
             contest_ref.set(contest_data)
-            await ctx.send(f"@everyone Un nouveau concours a été créé : **'{contest_name}'** ! Fin des inscriptions le **{end_date.strftime('%Y-%m-%d')}**.")
+            
             await ctx.message.delete()
 
         except Exception as e:
             await ctx.send(f"Erreur lors de la création du concours : {e}", delete_after=120)
 
-    @commands.command(name='helpoxel', help="Affiche l'aide sur les commandes.")
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: Interaction):
+        """Gère les interactions avec les boutons pour les concours."""
+        if interaction.type == discord.InteractionType.component:
+            custom_id = interaction.data['custom_id']
+            if custom_id.startswith('join_contest_'):
+                contest_name = custom_id.replace('join_contest_', '', 1)
+                contest_ref = db.collection('contests').document(contest_name)
+                contest_doc = contest_ref.get()
+                
+                if not contest_doc.exists:
+                    await interaction.response.send_message("Ce concours n'existe plus.", ephemeral=True)
+                    return
+                
+                contest_data = contest_doc.to_dict()
+                user_id = str(interaction.user.id)
+                
+                if user_id in contest_data['participants']:
+                    await interaction.response.send_message("Vous êtes déjà inscrit au concours.", ephemeral=True)
+                else:
+                    contest_data['participants'][user_id] = interaction.user.name
+                    contest_ref.set(contest_data)
+                    await interaction.response.send_message(f"Vous êtes inscrit au concours '{contest_name}' !", ephemeral=True)
+
+
+    @commands.command(name='helpoxel', help="Affiche l'aide sur les commandes. Ex: `!helpoxel create_event` ou `!helpoxel`")
     async def help_command(self, ctx, *, command_name: str = None):
         """Affiche l'aide détaillée pour une commande spécifique ou la liste complète."""
         await ctx.message.delete()
@@ -438,7 +509,6 @@ class EventManager(commands.Cog):
                     description=command.help,
                     color=0x027afa
                 )
-                embed.add_field(name="Syntaxe", value=f"`{bot.command_prefix}{command.name} {command.signature}`", inline=False)
                 msg = await ctx.send(embed=embed, delete_after=120)
         else:
             embed = Embed(
@@ -470,18 +540,19 @@ class EventManager(commands.Cog):
         event_name = event_data['name']
         role_id = event_data['role_id']
         participants = event_data['participants']
-        message_id = event_data['message_id']
-        announcement_channel_id = event_data['announcement_channel']
+        message_id = event_data.get('message_id')
+        announcement_channel_id = event_data.get('announcement_channel')
         
         announcement_channel = self.bot.get_channel(announcement_channel_id)
         if not announcement_channel:
             return
         
         # Retirer le rôle à tous les participants
-        role = announcement_channel.guild.get_role(role_id)
+        guild = announcement_channel.guild
+        role = guild.get_role(role_id)
         if role:
             for user_id in participants.keys():
-                member = announcement_channel.guild.get_member(int(user_id))
+                member = guild.get_member(int(user_id))
                 if member:
                     try:
                         await member.remove_roles(role)
@@ -499,7 +570,7 @@ class EventManager(commands.Cog):
         await announcement_channel.send(f"@everyone L'événement **'{event_name}'** est terminé. Merci à tous les participants !")
 
         # Supprimer l'événement de la base de données
-        await db.collection('events').document(event_name).delete()
+        db.collection('events').document(event_name).delete()
 
 
     # Tâche en arrière-plan pour gérer les événements en temps réel
@@ -527,20 +598,35 @@ class EventManager(commands.Cog):
             
             try:
                 event_message = await announcement_channel.fetch_message(message_id)
-                # Met à jour l'embed en temps réel
                 await self.update_event_embed(event_data, event_message)
             except (HTTPException, NotFound):
                 # Le message a peut-être été supprimé, on le recrée
-                # Pour éviter cela, l'embed ne devrait être supprimé qu'à la fin
                 pass
 
             # Gestion des phases d'événement
             if event_data['status'] == 'created':
+                # Rappel matinal pour les événements planifiés
+                if event_data.get('reminded_morning') is False and start_time.date() == now.date() and now.hour >= 8:
+                    await announcement_channel.send(f"@everyone Rappel : l'événement **'{event_name}'** aura lieu aujourd'hui à {start_time.strftime('%H:%M')}.")
+                    event_data['reminded_morning'] = True
+                    db.collection('events').document(event_name).set(event_data)
+
                 # Rappel 30 minutes avant
                 if start_time - now <= timedelta(minutes=30) and 'reminded_30' not in event_data:
                     await announcement_channel.send(f"@everyone Rappel : l'événement **'{event_name}'** démarre dans moins de 30 minutes. Dernières inscriptions !")
                     event_data['reminded_30'] = True
                     db.collection('events').document(event_name).set(event_data)
+                
+                # Annulation de l'événement si pas assez de participants 1 min avant
+                if start_time - now <= timedelta(minutes=1) and len(event_data['participants']) < 2:
+                    await announcement_channel.send(f"@everyone L'événement **'{event_name}'** a été annulé car il y a moins de 2 participants.")
+                    db.collection('events').document(event_name).delete()
+                    try:
+                        message_to_delete = await announcement_channel.fetch_message(message_id)
+                        await message_to_delete.delete()
+                    except (HTTPException, NotFound):
+                        pass
+                    continue
                 
                 # Début de l'événement
                 if now >= start_time:
@@ -560,9 +646,7 @@ class EventManager(commands.Cog):
                             except HTTPException:
                                 pass
 
-                    # Annonce du début de l'événement
                     await announcement_channel.send(f"@everyone L'événement **'{event_name}'** a commencé ! Rendez-vous dans le salon <#{event_data['waiting_room_channel']}>.")
-                    # L'embed ne sera pas supprimé ici, il se mettra à jour pour afficher le temps restant avant la fin.
 
             elif event_data['status'] == 'started' and now >= end_time:
                 # Fin de l'événement
@@ -574,11 +658,47 @@ class EventManager(commands.Cog):
     @tasks.loop(minutes=10)
     async def contest_checker(self):
         """Vérifie la fin des concours et effectue les tirages."""
-        # Logique pour les concours
-        pass # À implémenter
+        docs = db.collection('contests').where('status', 'in', ['created']).stream()
+        now = datetime.now()
+        
+        async for doc in docs:
+            contest_data = doc.to_dict()
+            contest_name = doc.id
+            end_date = datetime.fromisoformat(contest_data['end_date'])
+            
+            if now.date() >= end_date.date():
+                participants = list(contest_data['participants'].keys())
+                channel = self.bot.get_channel(contest_data['channel_id'])
+                
+                if channel:
+                    if not participants:
+                        await channel.send(f"@everyone Le concours **'{contest_name}'** est terminé sans gagnant, car il n'y a pas eu de participants.")
+                    else:
+                        winner_id = random.choice(participants)
+                        winner = self.bot.get_user(int(winner_id))
+                        
+                        await channel.send(f"@everyone 🎉 Félicitations à {winner.mention}, qui est le grand gagnant du concours **'{contest_name}'** ! 🎉")
+                        try:
+                            await winner.send(f"Félicitations ! Vous avez gagné le concours **'{contest_name}'**. Veuillez contacter les administrateurs du serveur pour récupérer votre prix.")
+                        except HTTPException:
+                            pass # Le bot ne peut pas envoyer de DM
+                
+                contest_data['status'] = 'ended'
+                db.collection('contests').document(contest_name).set(contest_data)
+                
+                # Suppression de l'embed
+                message_id = contest_data.get('message_id')
+                if message_id:
+                    try:
+                        message_to_delete = await channel.fetch_message(message_id)
+                        await message_to_delete.delete()
+                    except (HTTPException, NotFound):
+                        pass
+
 
     @event_checker.before_loop
-    async def before_event_checker(self):
+    @contest_checker.before_loop
+    async def before_tasks(self):
         await self.bot.wait_until_ready()
 
 @bot.event
