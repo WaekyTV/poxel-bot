@@ -5,9 +5,10 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import firebase_admin
 from firebase_admin import credentials, firestore
-from discord.ui import Button, View, Modal, InputText
-from flask import Flask
+from discord.ui import Button, View, Modal
+from discord.ext import commands
 import threading
+from flask import Flask
 
 # --- Configuration et Initialisation ---
 # Vous devez remplacer ces valeurs par les vôtres.
@@ -138,40 +139,38 @@ async def update_event_embed(event_name):
 
 # --- Classes de l'Interface Utilisateur ---
 
-class InscriptionModal(Modal):
+class InscriptionModal(Modal, title="Inscription"):
     """
     Fenêtre modale pour demander le pseudonyme du participant.
     """
-    def __init__(self, event_name, user, *args, **kwargs):
-        super().__init__(
-            title=f"Inscription pour l'événement '{event_name}'"
-        )
+    pseudo = discord.ui.TextInput(
+        label="Votre pseudonyme en jeu",
+        placeholder="Ex: Poxel",
+        min_length=1,
+        max_length=32
+    )
+
+    def __init__(self, event_name, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.event_name = event_name
-        self.user = user
 
-        self.add_item(InputText(
-            label="Votre pseudonyme en jeu",
-            placeholder="Ex: Poxel",
-            min_length=1,
-            max_length=32
-        ))
-
-    async def callback(self, interaction: discord.Interaction):
+    async def on_submit(self, interaction: discord.Interaction):
         event = events.get(self.event_name)
         if not event:
             await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True)
             return
 
-        pseudo = self.children[0].value
+        pseudo = self.pseudo.value
+        user = interaction.user
         
         # Vérifier si l'utilisateur est déjà inscrit
-        if any(p['id'] == self.user.id for p in event['participants']):
+        if any(p['id'] == user.id for p in event['participants']):
              await interaction.response.send_message("Vous êtes déjà inscrit !", ephemeral=True)
              return
 
         # Gérer la logique d'inscription
         event['participants'].append({
-            'id': self.user.id,
+            'id': user.id,
             'pseudo': pseudo
         })
 
@@ -209,7 +208,7 @@ class EventView(View):
         """
         Gère le clic sur le bouton START. Ouvre la modal d'inscription.
         """
-        modal = InscriptionModal(self.event_name, interaction.user)
+        modal = InscriptionModal(self.event_name)
         await interaction.response.send_modal(modal)
 
     async def quit_callback(self, interaction: discord.Interaction):
