@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import asyncio
+import json
 from datetime import datetime, timedelta
 import random
 
@@ -42,15 +43,14 @@ flask_thread.start()
 # GIF_URL = URL d'un GIF rétro pour les embeds
 # Pour des raisons de sécurité, nous lisons les clés depuis l'environnement.
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-FIREBASE_CREDENTIALS = os.getenv('FIREBASE_CREDENTIALS')
+FIREBASE_CREDENTIALS_JSON_STRING = os.getenv('FIREBASE_CREDENTIALS')
 GIF_URL = os.getenv('GIF_URL', 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExYzFlajVsaHgyd2l0YXc5NWdwN3Z5a201M2ZlMGZkYWJjb3F3ZzVtNiZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/LvtL8l1i0qR0B9bC2E/giphy.gif') # Exemple de GIF rétro
 
 # Initialisation de Firebase
 try:
     if not firebase_admin._apps:
-        # La clé doit être stockée dans une variable d'environnement ou lue depuis un fichier.
-        # Ici, on suppose qu'elle est une chaîne JSON.
-        cred = credentials.Certificate(FIREBASE_CREDENTIALS)
+        # CORRECTION ICI : On parse la chaîne JSON en un dictionnaire.
+        cred = credentials.Certificate(json.loads(FIREBASE_CREDENTIALS_JSON_STRING))
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 except Exception as e:
@@ -433,4 +433,4 @@ class EventManager(commands.Cog):
             for command in self.bot.commands:
                 if not command.hidden:
                     embed.add_field(name=f"`!{command.name}`", value=command.help or "Pas de description.", inline=True)
-            msg = aw
+            msg = await ctx.send(embed=embed, delet
