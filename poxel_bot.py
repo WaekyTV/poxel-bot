@@ -1,3 +1,4 @@
+from flask import Flask
 import discord
 from discord.ext import commands, tasks
 from discord.ui import Button, View
@@ -848,3 +849,4 @@ if __name__ == "__main__":
     flask_thread.start()
 
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
