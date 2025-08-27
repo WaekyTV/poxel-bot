@@ -1,7 +1,9 @@
 import os
 import discord
 from discord.ext import commands, tasks
-from discord.ui import Button, View, Modal, InputText
+from discord.ui import Button, View, Modal
+from discord.interactions import Interaction
+from discord import ui
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -9,10 +11,11 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import pytz
 import random
+from flask import Flask, request
+from threading import Thread
 
 # --- Initialisation de Firebase ---
 # Le fichier JSON de votre clé de service Firebase doit être placé dans le même répertoire que le bot.
-# S'il n'existe pas, il faudra le créer sur la console Firebase.
 FIREBASE_KEY_PATH = "firebase_key.json"
 try:
     cred = credentials.Certificate(FIREBASE_KEY_PATH)
@@ -24,12 +27,9 @@ except Exception as e:
     db = None
 
 # --- Configuration du bot et des variables d'environnement ---
-# Charge les variables d'environnement depuis le fichier .env
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-# L'URL de l'image GIF pour l'embed
 NEON_GIF_URL = "https://media.giphy.com/media/26n6Gx9moj0ghzKkyS/giphy.gif"
-# Couleurs pour les embeds
 COLOR_PURPLE = 0x6441a5
 COLOR_BLUE = 0x027afa
 COLOR_GREEN = 0x228B22
@@ -48,7 +48,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 help_messages = {}
 
 # --- Modèles de données Firestore ---
-# Création des collections pour stocker les données
 events_ref = db.collection("events") if db else None
 contests_ref = db.collection("contests") if db else None
 
@@ -56,7 +55,6 @@ contests_ref = db.collection("contests") if db else None
 async def clean_up_message(message_id, channel_id):
     """
     Supprime un message après un délai de 2 minutes.
-    Utile pour les messages d'erreur et d'aide.
     """
     await asyncio.sleep(120)
     try:
@@ -93,19 +91,20 @@ class PlayerModal(Modal):
         self.event_name = event_name
         self.event_ref = event_ref
         self.user_id = user_id
-        self.add_item(InputText(label="Pseudo", placeholder="Votre pseudo pour l'événement..."))
+        self.add_item(ui.InputText(label="Pseudo", placeholder="Votre pseudo pour l'événement..."))
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(self, interaction: Interaction):
         pseudo = self.children[0].value
         event_doc = self.event_ref.get().to_dict()
+        if not event_doc:
+            return await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True)
+            
         participants = event_doc.get("participants", [])
 
-        # Empêche l'utilisateur de s'inscrire plusieurs fois
         if self.user_id in [p["id"] for p in participants]:
-            await interaction.response.send_message(
+            return await interaction.response.send_message(
                 "Vous êtes déjà inscrit à cet événement !", ephemeral=True
             )
-            return
 
         participants.append({
             "id": self.user_id,
@@ -115,7 +114,6 @@ class PlayerModal(Modal):
 
         self.event_ref.update({"participants": participants})
         
-        # Mettre à jour l'embed de l'événement en temps réel
         await update_event_embed(self.event_ref.id)
         await interaction.response.send_message(
             f"Félicitations {interaction.user.mention}, vous avez rejoint l'événement **{self.event_name}** avec le pseudo **{pseudo}** !",
@@ -130,14 +128,14 @@ class EventView(View):
         super().__init__(*args, **kwargs)
         self.event_doc_ref = event_doc_ref
 
-    @discord.ui.button(label="START", style=discord.ButtonStyle.green, custom_id="start_button")
-    async def start_button(self, button, interaction: discord.Interaction):
-        # Ouvre la fenêtre modale pour l'inscription
+    @ui.button(label="START", style=discord.ButtonStyle.green, custom_id="start_button")
+    async def start_button(self, button: ui.Button, interaction: Interaction):
         event_doc = self.event_doc_ref.get().to_dict()
-        if not event_doc: return await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True)
+        if not event_doc:
+            return await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True)
+            
         if len(event_doc.get("participants", [])) >= event_doc["max_participants"]:
-            await interaction.response.send_message("L'inscription est complète, désolé !", ephemeral=True)
-            return
+            return await interaction.response.send_message("L'inscription est complète, désolé !", ephemeral=True)
         
         modal = PlayerModal(
             event_name=event_doc["name"],
@@ -146,13 +144,14 @@ class EventView(View):
         )
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="QUIT", style=discord.ButtonStyle.red, custom_id="quit_button")
-    async def quit_button(self, button, interaction: discord.Interaction):
+    @ui.button(label="QUIT", style=discord.ButtonStyle.red, custom_id="quit_button")
+    async def quit_button(self, button: ui.Button, interaction: Interaction):
         event_doc = self.event_doc_ref.get().to_dict()
-        if not event_doc: return await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True)
+        if not event_doc:
+            return await interaction.response.send_message("Cet événement n'existe plus.", ephemeral=True)
+            
         participants = event_doc.get("participants", [])
         
-        # Trouver et retirer le participant de la liste
         new_participants = [p for p in participants if p["id"] != interaction.user.id]
         if len(new_participants) < len(participants):
             self.event_doc_ref.update({"participants": new_participants})
@@ -172,7 +171,7 @@ async def update_event_embed(event_id):
     """
     try:
         event_doc = events_ref.document(event_id).get().to_dict()
-        if not event_doc: return
+        if not event_doc or event_doc.get("is_ended"): return
 
         guild = bot.get_guild(event_doc["guild_id"])
         announce_channel = guild.get_channel(event_doc["announce_channel_id"])
@@ -185,14 +184,11 @@ async def update_event_embed(event_id):
         
         participants_list = event_doc.get("participants", [])
 
-        # Gérer le titre de l'embed et le temps restant
         time_left_string = ""
-        is_closed = False # Flag pour désactiver le bouton
+        is_closed = False
         
-        # Heure de Paris pour l'affichage
         paris_tz = pytz.timezone('Europe/Paris')
         start_time_local = start_time.astimezone(paris_tz)
-        end_time_local = end_time.astimezone(paris_tz)
         
         if current_time < start_time:
             time_left = start_time - current_time
@@ -202,32 +198,26 @@ async def update_event_embed(event_id):
             minutes, seconds = divmod(remainder, 60)
             
             time_parts = []
-            if days > 0:
-                time_parts.append(f"{days} jour(s)")
-            if hours > 0:
-                time_parts.append(f"{hours} heure(s)")
-            if minutes > 0:
-                time_parts.append(f"{minutes} minute(s)")
-            if seconds > 0 or not time_parts:
-                time_parts.append(f"{seconds} seconde(s)")
+            if days > 0: time_parts.append(f"{days} jour(s)")
+            if hours > 0: time_parts.append(f"{hours} heure(s)")
+            if minutes > 0: time_parts.append(f"{minutes} minute(s)")
+            if seconds > 0 or not time_parts: time_parts.append(f"{seconds} seconde(s)")
             
             time_left_string = f"DÉBUT DANS {', '.join(time_parts)}"
             is_closed = len(participants_list) >= event_doc["max_participants"]
-            if is_closed:
-                time_left_string = "INSCRIPTIONS FERMÉES"
+            if is_closed: time_left_string = "INSCRIPTIONS FERMÉES"
 
         elif current_time < end_time:
             time_left = end_time - current_time
             minutes, seconds = divmod(int(time_left.total_seconds()), 60)
             time_left_string = f"L'ÉVÉNEMENT EST EN COURS. FIN DANS {minutes} min, {seconds} s"
-            is_closed = True # Les inscriptions sont fermées pendant l'événement
+            is_closed = True
         else:
             time_since_end = current_time - end_time
             minutes, seconds = divmod(int(time_since_end.total_seconds()), 60)
             time_left_string = f"ÉVÉNEMENT TERMINÉ IL Y A {minutes} min, {seconds} s"
             is_closed = True
 
-        # Création de l'embed
         embed = discord.Embed(
             title=f"NEW EVENT: {event_doc['name']}",
             description=f"**DATE :** {start_time_local.strftime('%d/%m/%Y')} à {start_time_local.strftime('%H:%M')}\n**DURÉE :** {event_doc['duration_minutes']} min\n**PARTICIPANTS :** {len(participants_list)}/{event_doc['max_participants']}\n**SALON D'ATTENTE :** <#{event_doc['waiting_channel_id']}>",
@@ -243,7 +233,6 @@ async def update_event_embed(event_id):
 
         view = EventView(events_ref.document(event_id))
         
-        # Gérer le bouton d'inscription
         view.children[0].label = "INSCRIPTION CLOSE" if is_closed else "START"
         view.children[0].disabled = is_closed
 
@@ -253,7 +242,7 @@ async def update_event_embed(event_id):
         print(f"Erreur lors de la mise à jour de l'embed {event_id}: {e}")
         
 # --- Tâche de vérification des événements en arrière-plan ---
-@tasks.loop(seconds=1)  # La boucle s'exécute chaque seconde pour une meilleure précision
+@tasks.loop(seconds=1)
 async def check_events():
     if not db: return
     
@@ -269,35 +258,29 @@ async def check_events():
         end_time = start_time + duration
         now = datetime.now(timezone.utc)
         
-        # Convertir l'heure de l'événement en UTC pour la comparaison
         event_start_utc = start_time.replace(tzinfo=timezone.utc)
         event_end_utc = end_time.replace(tzinfo=timezone.utc)
 
-        # Mise à jour de l'embed
         await update_event_embed(event_id)
 
-        # Rappel 12 heures avant le début (matin de l'événement)
         time_until_start = event_start_utc - now
+        
         if timedelta(hours=11, minutes=59) < time_until_start < timedelta(hours=12, minutes=1) and not event.get("morning_notified", False):
             await send_event_notification(event, "rappel_matin")
             events_ref.document(event_id).update({"morning_notified": True})
 
-        # Rappel 30 minutes avant le début
         if timedelta(minutes=29) < time_until_start < timedelta(minutes=31) and not event.get("30min_notified", False):
             await send_event_notification(event, "rappel_30min")
             events_ref.document(event_id).update({"30min_notified": True})
         
-        # Vérification du nombre de participants et annulation si nécessaire
         min_participants = event.get("min_participants", 1)
-        if time_until_start <= timedelta(minutes=30) and len(event.get("participants", [])) < min_participants and not event.get("is_canceled", False):
+        if time_until_start < timedelta(minutes=30) and len(event.get("participants", [])) < min_participants and not event.get("is_canceled", False):
             await send_event_notification(event, "canceled")
             events_ref.document(event_id).update({"status": "canceled", "is_canceled": True, "is_ended": True})
             
-        # Début de l'événement
         if now > event_start_utc and not event.get("is_started", False) and not event.get("is_canceled", False):
             await start_event(event, event_id)
             
-        # Fin de l'événement
         if now > event_end_utc and not event.get("is_ended", False):
             await end_event_automatically(event, event_id)
 
@@ -362,7 +345,6 @@ async def end_event_automatically(event, event_id):
             
     await send_event_notification(event, "end")
     
-    # Suppression de l'embed à la fin de l'événement
     try:
         announce_channel = guild.get_channel(event["announce_channel_id"])
         embed_message = await announce_channel.fetch_message(event["embed_message_id"])
@@ -386,18 +368,17 @@ async def on_raw_reaction_add(payload):
     """
     Gère l'inscription aux concours via les réactions.
     """
-    if not db: return
+    if not db or payload.user_id == bot.user.id:
+        return
     
     channel = bot.get_channel(payload.channel_id)
     if not isinstance(channel, discord.TextChannel):
         return
 
-    # Vérifie si la réaction est sur un message de concours
     docs = contests_ref.where("message_id", "==", payload.message_id).stream()
     for doc in docs:
         contest_data = doc.to_dict()
         if not contest_data.get("is_ended", False):
-            # Ajoute le participant si il n'est pas déjà dans la liste
             if payload.user_id not in [p["id"] for p in contest_data.get("participants", [])]:
                 participants = contest_data.get("participants", [])
                 user = bot.get_user(payload.user_id)
@@ -448,39 +429,27 @@ async def on_command_error(ctx, error):
 # --- Commandes du bot ---
 @bot.command(name="create_event")
 @commands.has_permissions(manage_roles=True)
-async def create_event(ctx, start_time_str, duration_str, role: discord.Role, announce_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, game_name: str, event_name: str):
-    """
-    Crée un événement qui débute le jour même, en utilisant le fuseau horaire de Paris.
-    """
+async def create_event(ctx, start_time_str, duration_str, role: discord.Role, announce_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, game_name: str, *, event_name: str):
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
     
-    # Validation du format d'heure
     try:
         start_time_local_naive = datetime.strptime(start_time_str, "%Hh%M").time()
-        
-        # Ajout du fuseau horaire de Paris
         paris_tz = pytz.timezone('Europe/Paris')
-        # Créer un objet datetime pour le jour même, puis le localiser
         start_datetime_local = paris_tz.localize(datetime.combine(datetime.now(paris_tz).date(), start_time_local_naive))
-        
-        # Convertir en UTC pour la persistance
         start_datetime_utc = start_datetime_local.astimezone(pytz.utc)
         
-        # Vérifier si l'heure de début est passée
         if start_datetime_utc < datetime.now(timezone.utc):
             return await send_error_embed(ctx, "Erreur de temps", "L'heure de début de l'événement est déjà passée.")
             
     except ValueError:
         return await send_error_embed(ctx, "Format d'heure invalide", "Le format d'heure doit être `HHhMM` (ex: `21h14`).")
 
-    # Validation de la durée
     try:
         duration_minutes = int(duration_str.replace("min", ""))
     except ValueError:
         return await send_error_embed(ctx, "Format de durée invalide", "Le format de durée doit être `XXmin` (ex: `10min`).")
         
-    # Vérifier si un événement du même nom est déjà en cours
     existing_events = events_ref.where("name", "==", event_name).stream()
     for doc in existing_events:
         event_data = doc.to_dict()
@@ -510,7 +479,6 @@ async def create_event(ctx, start_time_str, duration_str, role: discord.Role, an
     
     embed = discord.Embed(
         title=f"NEW EVENT: {event_name}",
-        # L'affichage utilise l'heure locale de Paris pour plus de clarté pour l'utilisateur
         description=f"**DATE :** {start_datetime_local.strftime('%d/%m/%Y')} à {start_datetime_local.strftime('%H:%M')}\n**DURÉE :** {duration_minutes} min\n**PARTICIPANTS :** 0/{max_participants}\n**SALON D'ATTENTE :** {waiting_channel.mention}",
         color=COLOR_PURPLE
     )
@@ -520,39 +488,30 @@ async def create_event(ctx, start_time_str, duration_str, role: discord.Role, an
         inline=False
     )
     embed.set_image(url=NEON_GIF_URL)
-    # Afficher le temps restant en minutes et secondes
     time_left_initial = start_datetime_utc - datetime.now(timezone.utc)
     minutes, seconds = divmod(int(time_left_initial.total_seconds()), 60)
     embed.set_footer(text=f"DÉBUT DANS {minutes} minute(s), {seconds} seconde(s)")
 
     view = EventView(doc_ref)
+    view.children[0].label = "START"
+    view.children[0].disabled = False
     
-    # Envoi de l'annonce avec le bouton
     msg = await announce_channel.send(f"@everyone Un nouvel événement a été créé par {ctx.author.mention} !", embed=embed, view=view)
     
-    # Sauvegarde l'ID du message de l'embed
     doc_ref.update({"embed_message_id": msg.id})
     await ctx.send(f"L'événement **{event_name}** a été créé avec succès !")
     bot.loop.create_task(clean_up_message(ctx.message.id, ctx.channel.id))
 
 @bot.command(name="create_event_plan")
 @commands.has_permissions(manage_roles=True)
-async def create_event_plan(ctx, date_str, start_time_str, duration_str, role: discord.Role, announce_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, game_name: str, event_name: str):
-    """
-    Crée un événement qui débute plusieurs jours à l'avance, en utilisant le fuseau horaire de Paris.
-    """
+async def create_event_plan(ctx, date_str, start_time_str, duration_str, role: discord.Role, announce_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, game_name: str, *, event_name: str):
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
         
-    # Validation du format de date et d'heure
     try:
         start_datetime_naive = datetime.strptime(f"{date_str} {start_time_str}", "%d/%m/%Y %Hh%M")
-        
-        # Ajout du fuseau horaire de Paris
         paris_tz = pytz.timezone('Europe/Paris')
         start_datetime_local = paris_tz.localize(start_datetime_naive)
-        
-        # Convertir en UTC pour la persistance
         start_datetime_utc = start_datetime_local.astimezone(pytz.utc)
         
         if start_datetime_utc < datetime.now(timezone.utc):
@@ -561,13 +520,11 @@ async def create_event_plan(ctx, date_str, start_time_str, duration_str, role: d
     except ValueError:
         return await send_error_embed(ctx, "Format de date/heure invalide", "Le format doit être `JJ/MM/AAAA HHhMM`.")
 
-    # Validation de la durée
     try:
         duration_minutes = int(duration_str.replace("min", ""))
     except ValueError:
         return await send_error_embed(ctx, "Format de durée invalide", "Le format de durée doit être `XXmin` (ex: `10min`).")
         
-    # Vérifier si un événement du même nom est déjà en cours
     existing_events = events_ref.where("name", "==", event_name).stream()
     for doc in existing_events:
         event_data = doc.to_dict()
@@ -597,7 +554,6 @@ async def create_event_plan(ctx, date_str, start_time_str, duration_str, role: d
 
     embed = discord.Embed(
         title=f"NEW EVENT: {event_name}",
-        # L'affichage utilise l'heure locale de Paris pour plus de clarté
         description=f"**DATE :** {start_datetime_local.strftime('%d/%m/%Y')} à {start_datetime_local.strftime('%H:%M')}\n**DURÉE :** {duration_minutes} min\n**PARTICIPANTS :** 0/{max_participants}\n**SALON D'ATTENTE :** {waiting_channel.mention}",
         color=COLOR_PURPLE
     )
@@ -611,7 +567,6 @@ async def create_event_plan(ctx, date_str, start_time_str, duration_str, role: d
 
     view = EventView(doc_ref)
     
-    # Envoi de l'annonce
     msg = await announce_channel.send(f"@everyone Un nouvel événement a été planifié par {ctx.author.mention} !", embed=embed, view=view)
     doc_ref.update({"embed_message_id": msg.id})
     await ctx.send(f"L'événement planifié **{event_name}** a été créé avec succès !")
@@ -620,9 +575,6 @@ async def create_event_plan(ctx, date_str, start_time_str, duration_str, role: d
 @bot.command(name="end_event")
 @commands.has_permissions(manage_roles=True)
 async def end_event(ctx, *, event_name: str):
-    """
-    Termine manuellement un événement.
-    """
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
         
@@ -643,9 +595,6 @@ async def end_event(ctx, *, event_name: str):
 @bot.command(name="tirage")
 @commands.has_permissions(manage_roles=True)
 async def tirage(ctx, *, event_name: str):
-    """
-    Effectue un tirage au sort parmi les participants d'un événement.
-    """
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
         
@@ -657,9 +606,7 @@ async def tirage(ctx, *, event_name: str):
         participants = event_data.get("participants", [])
         
         if not participants:
-            await send_error_embed(ctx, "Pas de participants", "Il n'y a aucun participant pour ce tirage au sort.")
-            bot.loop.create_task(clean_up_message(ctx.message.id, ctx.channel.id))
-            return
+            return await send_error_embed(ctx, "Pas de participants", "Il n'y a aucun participant pour ce tirage au sort.")
             
         winner_data = random.choice(participants)
         winner = discord.utils.get(ctx.guild.members, id=winner_data["id"])
@@ -683,9 +630,6 @@ async def tirage(ctx, *, event_name: str):
 @bot.command(name="concours")
 @commands.has_permissions(manage_roles=True)
 async def create_contest(ctx, end_date_str: str, *, contest_name: str):
-    """
-    Crée un concours avec une date limite de participation.
-    """
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
         
@@ -715,7 +659,7 @@ async def create_contest(ctx, end_date_str: str, *, contest_name: str):
     )
     
     msg = await ctx.send("@everyone", embed=embed)
-    await msg.add_reaction("✅") # Ajout d'une réaction pour que les utilisateurs puissent s'inscrire
+    await msg.add_reaction("✅")
 
     doc_ref.update({"message_id": msg.id})
     await ctx.send(f"Le concours **{contest_name}** a été créé avec succès !")
@@ -724,9 +668,6 @@ async def create_contest(ctx, end_date_str: str, *, contest_name: str):
 @bot.command(name="end_contest")
 @commands.has_permissions(manage_roles=True)
 async def end_contest(ctx, *, contest_name: str):
-    """
-    Termine un concours et tire un gagnant au sort.
-    """
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
 
@@ -738,9 +679,7 @@ async def end_contest(ctx, *, contest_name: str):
         participants = contest_data.get("participants", [])
         
         if not participants:
-            await send_error_embed(ctx, "Pas de participants", "Il n'y a aucun participant pour ce concours.")
-            bot.loop.create_task(clean_up_message(ctx.message.id, ctx.channel.id))
-            return
+            return await send_error_embed(ctx, "Pas de participants", "Il n'y a aucun participant pour ce concours.")
             
         winner_data = random.choice(participants)
         winner = discord.utils.get(ctx.guild.members, id=winner_data["id"])
@@ -765,9 +704,6 @@ async def end_contest(ctx, *, contest_name: str):
 
 @bot.command(name="list_events")
 async def list_events(ctx):
-    """
-    Affiche la liste de tous les événements actifs.
-    """
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
     
@@ -789,9 +725,6 @@ async def list_events(ctx):
     
 @bot.command(name="my_permissions")
 async def my_permissions(ctx):
-    """
-    Vérifie et affiche les permissions d'un utilisateur sur le serveur.
-    """
     if ctx.author.guild_permissions.manage_roles:
         await ctx.send(f"✅ {ctx.author.mention}, vous avez les permissions de `Gérer les rôles`, vous pouvez donc utiliser les commandes d'administration du bot.")
     else:
@@ -800,9 +733,6 @@ async def my_permissions(ctx):
 
 @bot.command(name="helpoxel")
 async def helpoxel(ctx, command_name: str = None):
-    """
-    Affiche une aide détaillée pour les commandes.
-    """
     embed_color = COLOR_BLUE
     embed_title = "MANUEL DE POXEL"
     embed_description = ""
@@ -839,7 +769,7 @@ async def helpoxel(ctx, command_name: str = None):
             **!concours "[nom du concours]" [date de fin]**
             
             Crée un concours avec une date limite de participation. Les utilisateurs s'inscrivent en réagissant à l'annonce.
-            • **Exemple :** `!concours 01/01/2026 "concours du nouvel an"`
+            • **Exemple :** `!concours "concours du nouvel an" 01/01/2026`
             """
         elif command_name == "end_contest":
             embed_description = """
@@ -878,15 +808,11 @@ async def helpoxel(ctx, command_name: str = None):
     embed = discord.Embed(title=embed_title, description=embed_description, color=embed_color)
     help_msg = await ctx.send(embed=embed)
     
-    # Enregistre le message pour le nettoyage automatique
     help_messages[help_msg.id] = True
     bot.loop.create_task(clean_up_message(ctx.message.id, ctx.channel.id))
     bot.loop.create_task(clean_up_message(help_msg.id, ctx.channel.id))
 
 # --- Point de terminaison Flask pour le ping de Render ---
-from flask import Flask, request
-from threading import Thread
-
 app = Flask(__name__)
 
 @app.route("/")
@@ -896,7 +822,6 @@ def home():
 def run_flask_server():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
-# Lancement du bot et du serveur Flask
 if __name__ == "__main__":
     t = Thread(target=run_flask_server)
     t.start()
