@@ -5,15 +5,14 @@ import datetime
 import asyncio
 import os
 import json
-import pytz # Nouvelle importation pour la gestion des fuseaux horaires
+import pytz
+import sys
+import io
 
-# Importation et configuration de Flask pour l'hébergement
-from flask import Flask
-from threading import Thread
+# Assurez-vous que l'encodage par défaut est UTF-8
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 # Configuration du bot
-# Assurez-vous d'avoir les intents nécessaires pour les messages,
-# les membres, et la gestion des événements.
 intents = discord.Intents.all()
 intents.members = True
 intents.guilds = True
@@ -24,54 +23,37 @@ intents.reactions = True
 # Préfixe de la commande pour le bot
 BOT_PREFIX = "!"
 
-# Définition des couleurs pour l'embed, comme demandé
+# Définition des couleurs pour l'embed
 NEON_PURPLE = 0x6441a5
 NEON_BLUE = 0x027afa
 
 # Définition du fuseau horaire de l'utilisateur (France métropolitaine)
 USER_TIMEZONE = pytz.timezone('Europe/Paris')
-# Définition du fuseau horaire du serveur (UTC par convention)
 SERVER_TIMEZONE = pytz.utc
 
-# --- DATABASE (MAQUETTE) ---
-# En production, il faudrait utiliser le SDK Firebase pour une base de données réelle.
-# Ici, nous simulons la persistance des données dans un fichier JSON.
+# --- DATABASE (SIMULATION) ---
 DATABASE_FILE = 'events.json'
 
 def load_events():
     """Charge les données des événements depuis le fichier de la base de données."""
     if os.path.exists(DATABASE_FILE):
-        with open(DATABASE_FILE, 'r') as f:
+        with open(DATABASE_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {"events": {}, "contests": {}}
 
 def save_events(data):
     """Sauvegarde les données des événements dans le fichier de la base de données."""
-    with open(DATABASE_FILE, 'w') as f:
+    with open(DATABASE_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4)
 
 # Variable globale pour la base de données (simulée)
 db = load_events()
-
-# --- FLASK SERVER POUR LA PERSISTANCE (RENDER) ---
-# Ceci est nécessaire pour que le bot reste en ligne sur des services comme Render.
-# Uptime Robot pinge cette URL pour éviter que l'application ne se mette en veille.
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Poxel Bot is running!"
-
-def run_flask():
-    """Démarre le serveur Flask."""
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
 # --- CLASSES DE BOUTONS ET DE VUES ---
 
 class EventButtonsView(View):
     """
     Vue contenant les boutons d'inscription et de désinscription pour un événement.
-    Les boutons sont gérés de manière dynamique.
     """
     def __init__(self, bot, event_name, event_data, timeout=None):
         super().__init__(timeout=timeout)
@@ -81,14 +63,12 @@ class EventButtonsView(View):
         self.max_participants = self.event_data['max_participants']
         self.current_participants = len(self.event_data['participants'])
 
-        # Mise à jour de l'état des boutons au chargement
         self.update_buttons()
 
     def update_buttons(self):
         """Met à jour l'état visuel des boutons."""
         self.clear_items()
         
-        # Bouton START (INSCRIPTION)
         start_button = Button(
             label="START",
             style=discord.ButtonStyle.success,
@@ -101,7 +81,6 @@ class EventButtonsView(View):
         start_button.callback = self.on_start_click
         self.add_item(start_button)
         
-        # Bouton QUIT (DESINSCRIPTION)
         quit_button = Button(
             label="QUIT",
             style=discord.ButtonStyle.danger,
@@ -110,7 +89,6 @@ class EventButtonsView(View):
         quit_button.callback = self.on_quit_click
         self.add_item(quit_button)
         
-        # Bouton "Liste des événements en cours"
         list_button = Button(
             label="Liste des événements en cours",
             style=discord.ButtonStyle.secondary
@@ -121,34 +99,29 @@ class EventButtonsView(View):
     async def on_start_click(self, interaction: discord.Interaction):
         """Gère l'inscription d'un utilisateur."""
         user = interaction.user
-        event_name = self.event_name
         
         if user.id in [p['id'] for p in self.event_data['participants']]:
             await interaction.response.send_message("Vous êtes déjà inscrit à cet événement !", ephemeral=True)
             return
 
-        # Ouverture de la modale pour le pseudo
-        modal = ParticipantModal(self, event_name)
+        modal = ParticipantModal(self, self.event_name)
         await interaction.response.send_modal(modal)
 
     async def on_quit_click(self, interaction: discord.Interaction):
         """Gère la désinscription d'un utilisateur."""
         user_id = interaction.user.id
-        event_name = self.event_name
         
         if user_id not in [p['id'] for p in self.event_data['participants']]:
             await interaction.response.send_message("Vous n'êtes pas inscrit à cet événement.", ephemeral=True)
             return
             
-        # Suppression du participant
         self.event_data['participants'] = [p for p in self.event_data['participants'] if p['id'] != user_id]
         save_events(db)
         
         self.current_participants = len(self.event_data['participants'])
         self.update_buttons()
         
-        # Mise à jour de l'embed
-        await update_event_embed(self.bot, event_name)
+        await update_event_embed(self.bot, self.event_name)
         await interaction.response.send_message("Vous vous êtes désinscrit de l'événement.", ephemeral=True)
 
     async def on_list_click(self, interaction: discord.Interaction):
@@ -189,7 +162,6 @@ class ParticipantModal(discord.ui.Modal, title="Pseudo pour le jeu"):
         user = interaction.user
         game_pseudo = self.game_pseudo.value
         
-        # Enregistrement du participant
         self.view.event_data['participants'].append({
             "id": user.id,
             "name": user.display_name,
@@ -200,7 +172,6 @@ class ParticipantModal(discord.ui.Modal, title="Pseudo pour le jeu"):
         self.view.current_participants = len(self.view.event_data['participants'])
         self.view.update_buttons()
 
-        # Mise à jour de l'embed
         await update_event_embed(self.view.bot, self.event_name)
         await interaction.response.send_message(f"Vous avez été inscrit à l'événement `{self.event_name}` avec le pseudo `{game_pseudo}`.", ephemeral=True)
 
@@ -219,15 +190,12 @@ def format_time_left(time_str, is_started):
     else:
         delta = time_utc - now_utc
 
-    # Si l'événement est déjà terminé, on affiche "FINI"
     if delta.total_seconds() < 0 and is_started:
         return "TERMINÉ"
 
-    # Affiche le temps écoulé si l'événement a déjà commencé
     if delta.total_seconds() < 0:
         return "À COMMENCÉ"
 
-    # Affiche le temps restant en secondes, minutes, heures et jours
     days = delta.days
     hours, remainder = divmod(delta.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -246,7 +214,7 @@ def format_time_left(time_str, is_started):
 
 async def update_event_embed(bot, event_name):
     """
-    Met à jour l'embed de l'événement avec les dernières informations (temps, participants).
+    Met à jour l'embed de l'événement avec les dernières informations.
     """
     if event_name not in db['events']:
         return
@@ -262,7 +230,6 @@ async def update_event_embed(bot, event_name):
         
         message = await channel.fetch_message(message_id)
         
-        # Création de l'embed mis à jour
         embed = discord.Embed(
             title=f"NEW EVENT: {event_name}",
             description="""
@@ -273,7 +240,6 @@ async def update_event_embed(bot, event_name):
         embed.add_field(name="POINT DE RALLIEMENT", value=f"<#{event['waiting_channel_id']}>", inline=True)
         embed.add_field(name="RÔLE ATTRIBUÉ", value=f"<@&{event['role_id']}>", inline=True)
         
-        # Gestion du temps et des inscriptions
         if not event.get('is_started'):
             embed.add_field(name="DÉBUT DANS", value=format_time_left(event['start_time'], event.get('is_started')), inline=False)
             view = EventButtonsView(bot, event_name, event)
@@ -282,22 +248,17 @@ async def update_event_embed(bot, event_name):
             embed.description = "L'événement est en cours. Les inscriptions sont closes."
             view = None
 
-        # Liste des participants
         participants_list = "\n".join([f"- **{p['name']}** ({p['pseudo']})" for p in event['participants']])
         if not participants_list:
             participants_list = "Aucun participant pour le moment."
             
         embed.add_field(name=f"PARTICIPANTS ({len(event['participants'])}/{event['max_participants']})", value=participants_list, inline=False)
         embed.set_footer(text="Style 8-bit futuriste, néon")
-        
-        # Ajout du GIF rétro
-        # Remplacer cette URL par l'URL de votre GIF
         embed.set_image(url="https://i.imgur.com/uCgE04g.gif") 
         
         await message.edit(embed=embed, view=view)
         
     except discord.NotFound:
-        # Le message a été supprimé, il faut nettoyer la base de données
         del db['events'][event_name]
         save_events(db)
     except Exception as e:
@@ -313,7 +274,6 @@ async def on_ready():
     """
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
     print("------")
-    # Lancement de la tâche planifiée de vérification des événements
     check_events.start()
     
 # --- GESTION DES COMMANDES ---
@@ -329,29 +289,17 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         await ctx.message.delete(delay=120)
         return
 
-    try:
-        max_participants = int(max_participants)
-        min_participants = int(min_participants)
-    except ValueError:
-        await ctx.send("Erreur: Les paramètres de participants doivent être des nombres entiers. Par exemple, `10 1` et non `10 pixels`.", delete_after=120)
-        await ctx.message.delete(delay=120)
-        return
-
     if event_name in db['events']:
         await ctx.send(f"Un événement nommé `{event_name}` existe déjà. Veuillez en terminer l'ancien ou choisir un autre nom.", delete_after=120)
         await ctx.message.delete(delay=120)
         return
 
     try:
-        # Création d'un objet datetime "naïf" (sans fuseau horaire)
         now = datetime.datetime.now()
         start_hour, start_minute = map(int, start_time_str.split('h'))
         start_time_naive = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
         
-        # Localisation de l'heure saisie dans le fuseau horaire de l'utilisateur
         start_time_localized = USER_TIMEZONE.localize(start_time_naive)
-        
-        # Conversion de l'heure de début en UTC pour le stockage et la logique
         start_time_utc = start_time_localized.astimezone(SERVER_TIMEZONE)
 
         duration_unit = duration_str[-3:].lower()
@@ -432,14 +380,6 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
         await ctx.message.delete(delay=120)
         return
     
-    try:
-        max_participants = int(max_participants)
-        min_participants = int(min_participants)
-    except ValueError:
-        await ctx.send("Erreur: Les paramètres de participants doivent être des nombres entiers. Par exemple, `10 1` et non `10 pixels`.", delete_after=120)
-        await ctx.message.delete(delay=120)
-        return
-
     if event_name in db['events']:
         await ctx.send(f"Un événement nommé `{event_name}` existe déjà. Veuillez en terminer l'ancien ou choisir un autre nom.", delete_after=120)
         await ctx.message.delete(delay=120)
@@ -449,13 +389,8 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
         day, month, year = map(int, date_str.split('/'))
         start_hour, start_minute = map(int, start_time_str.split('h'))
         
-        # Création d'un objet datetime "naïf" (sans fuseau horaire)
         start_time_naive = datetime.datetime(year, month, day, start_hour, start_minute)
-
-        # Localisation de l'heure saisie dans le fuseau horaire de l'utilisateur
         start_time_localized = USER_TIMEZONE.localize(start_time_naive)
-
-        # Conversion de l'heure de début en UTC pour le stockage et la logique
         start_time_utc = start_time_localized.astimezone(SERVER_TIMEZONE)
 
         duration_unit = duration_str[-3:].lower()
@@ -625,7 +560,7 @@ async def helpoxel(ctx, command_name: str = None):
 
 # --- TÂCHES PLANIFIÉES ---
 
-@tasks.loop(seconds=1) # Boucle toutes les secondes
+@tasks.loop(seconds=1)
 async def check_events():
     """
     Boucle de vérification qui s'exécute toutes les secondes pour gérer les événements en temps réel.
@@ -633,12 +568,10 @@ async def check_events():
     events_to_delete = []
     
     for event_name, event_data in list(db['events'].items()):
-        # Utilise le fuseau horaire du serveur pour la comparaison
         start_time_utc = datetime.datetime.fromisoformat(event_data['start_time']).replace(tzinfo=SERVER_TIMEZONE)
         now_utc = datetime.datetime.now(SERVER_TIMEZONE)
         end_time_utc = datetime.datetime.fromisoformat(event_data['end_time']).replace(tzinfo=SERVER_TIMEZONE)
 
-        # Logique pour le rappel de 30 minutes avant le début
         if not event_data.get('is_started') and not event_data.get('reminded_30m') and (start_time_utc - now_utc).total_seconds() <= 30 * 60 and start_time_utc > now_utc:
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if channel:
@@ -646,9 +579,7 @@ async def check_events():
                 event_data['reminded_30m'] = True
                 save_events(db)
         
-        # Logique pour le démarrage de l'événement et la clôture des inscriptions
         if not event_data.get('is_started') and now_utc >= start_time_utc:
-            # Annulation de l'événement si le nombre minimum de participants n'est pas atteint
             if len(event_data['participants']) < event_data['min_participants']:
                 channel = bot.get_channel(event_data['announcement_channel_id'])
                 if channel:
@@ -674,17 +605,14 @@ async def check_events():
                     await member.send(f"🎉 **Félicitations** ! L'événement `{event_name}` a démarré. Le rôle `{role.name}` vous a été attribué. Rendez-vous dans le salon <#{event_data['waiting_channel_id']}>.")
                     
             if channel:
-                # Ajout de la mention @everyone pour indiquer que les inscriptions sont closes
                 await channel.send(f"@everyone L'événement **{event_name}** a officiellement commencé ! Les inscriptions sont closes et le rôle a été attribué aux participants.")
             
-            # Mise à jour immédiate de l'embed pour la transition
             await update_event_embed(bot, event_name)
 
-        # Logique pour la fin de l'événement
         if now_utc >= end_time_utc and event_data.get('is_started'):
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if channel:
-                await channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants ! �")
+                await channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants ! 🎉")
             
             for participant in event_data['participants']:
                 member = bot.get_guild(channel.guild.id).get_member(participant['id'])
@@ -697,7 +625,6 @@ async def check_events():
                         print(f"Impossible de retirer le rôle du membre {member.id}: {e}")
             
             try:
-                # Suppression de l'embed final
                 message = await channel.fetch_message(event_data['message_id'])
                 await message.delete()
             except discord.NotFound:
@@ -705,7 +632,6 @@ async def check_events():
 
             events_to_delete.append(event_name)
         
-        # Mise à jour de l'embed en temps réel
         await update_event_embed(bot, event_name)
 
     for event_name in events_to_delete:
@@ -714,9 +640,7 @@ async def check_events():
         
     save_events(db)
 
+# Exécution du bot
 if __name__ == "__main__":
-    flask_thread = Thread(target=run_flask)
-    flask_thread.start()
-
+    # Lancement du bot
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
-�
