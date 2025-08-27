@@ -7,7 +7,7 @@ from discord import ui
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore_v1 import filter
+from google.cloud.firestore_v1.base_query import FieldFilter
 import asyncio
 from datetime import datetime, timedelta, timezone
 import pytz
@@ -383,7 +383,7 @@ async def on_raw_reaction_add(payload):
     if not isinstance(channel, discord.TextChannel):
         return
 
-    docs = contests_ref.where(filter.FieldFilter("message_id", "==", payload.message_id)).stream()
+    docs = contests_ref.where(filter=FieldFilter("message_id", "==", payload.message_id)).stream()
     for doc in docs:
         contest_data = doc.to_dict()
         if not contest_data.get("is_ended", False):
@@ -458,7 +458,7 @@ async def create_event(ctx, start_time_str, duration_str, role: discord.Role, an
     except ValueError:
         return await send_error_embed(ctx, "Format de durée invalide", "Le format de durée doit être `XXmin` (ex: `10min`).")
         
-    existing_events = events_ref.where(filter.FieldFilter("name", "==", event_name)).stream()
+    existing_events = events_ref.where(filter=FieldFilter("name", "==", event_name)).stream()
     for doc in existing_events:
         event_data = doc.to_dict()
         if not event_data.get("is_ended", False) and not event_data.get("is_canceled", False):
@@ -533,7 +533,7 @@ async def create_event_plan(ctx, date_str, start_time_str, duration_str, role: d
     except ValueError:
         return await send_error_embed(ctx, "Format de durée invalide", "Le format de durée doit être `XXmin` (ex: `10min`).")
         
-    existing_events = events_ref.where(filter.FieldFilter("name", "==", event_name)).stream()
+    existing_events = events_ref.where(filter=FieldFilter("name", "==", event_name)).stream()
     for doc in existing_events:
         event_data = doc.to_dict()
         if not event_data.get("is_ended", False) and not event_data.get("is_canceled", False):
@@ -586,7 +586,7 @@ async def end_event(ctx, *, event_name: str):
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
         
-    docs = events_ref.where(filter.FieldFilter("name", "==", event_name)).where(filter.FieldFilter("is_ended", "==", False)).stream()
+    docs = events_ref.where(filter=FieldFilter("name", "==", event_name)).where(filter=FieldFilter("is_ended", "==", False)).stream()
     doc_found = False
     for doc in docs:
         doc_found = True
@@ -606,7 +606,7 @@ async def tirage(ctx, *, event_name: str):
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
         
-    docs = events_ref.where(filter.FieldFilter("name", "==", event_name)).stream()
+    docs = events_ref.where(filter=FieldFilter("name", "==", event_name)).stream()
     doc_found = False
     for doc in docs:
         doc_found = True
@@ -679,7 +679,7 @@ async def end_contest(ctx, *, contest_name: str):
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
 
-    docs = contests_ref.where(filter.FieldFilter("name", "==", contest_name)).where(filter.FieldFilter("is_ended", "==", False)).stream()
+    docs = contests_ref.where(filter=FieldFilter("name", "==", contest_name)).where(filter=FieldFilter("is_ended", "==", False)).stream()
     doc_found = False
     for doc in docs:
         doc_found = True
@@ -715,7 +715,7 @@ async def list_events(ctx):
     if not db:
         return await send_error_embed(ctx, "Base de données non disponible", "Le bot n'a pas pu se connecter à la base de données Firebase.")
     
-    active_events = events_ref.where(filter.FieldFilter("is_ended", "==", False)).stream()
+    active_events = events_ref.where(filter=FieldFilter("is_ended", "==", False)).stream()
     
     event_list = ""
     for event in active_events:
