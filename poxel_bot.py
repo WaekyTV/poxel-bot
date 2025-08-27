@@ -319,13 +319,21 @@ async def on_ready():
 # --- GESTION DES COMMANDES ---
 
 @bot.command(name="create_event")
-async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, event_name: str):
+async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, *, event_name: str):
     """
     Crée un événement pour le jour même.
     Syntaxe: !create_event 21h30 10min @role #annonce #salle 10 1 "nom_evenement"
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
+        await ctx.message.delete(delay=120)
+        return
+
+    try:
+        max_participants = int(max_participants)
+        min_participants = int(min_participants)
+    except ValueError:
+        await ctx.send("Erreur: Les paramètres de participants doivent être des nombres entiers. Par exemple, `10 1` et non `10 pixels`.", delete_after=120)
         await ctx.message.delete(delay=120)
         return
 
@@ -413,7 +421,7 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     await ctx.message.delete(delay=120)
 
 @bot.command(name="create_event_plan")
-async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, event_name: str):
+async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, *, event_name: str):
     """
     Crée un événement planifié pour une date future.
     Identique à !create_event mais avec une date en plus.
@@ -421,6 +429,14 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
+        await ctx.message.delete(delay=120)
+        return
+    
+    try:
+        max_participants = int(max_participants)
+        min_participants = int(min_participants)
+    except ValueError:
+        await ctx.send("Erreur: Les paramètres de participants doivent être des nombres entiers. Par exemple, `10 1` et non `10 pixels`.", delete_after=120)
         await ctx.message.delete(delay=120)
         return
 
@@ -668,7 +684,7 @@ async def check_events():
         if now_utc >= end_time_utc and event_data.get('is_started'):
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if channel:
-                await channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants ! 🎉")
+                await channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants ! �")
             
             for participant in event_data['participants']:
                 member = bot.get_guild(channel.guild.id).get_member(participant['id'])
@@ -703,3 +719,4 @@ if __name__ == "__main__":
     flask_thread.start()
 
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+�
