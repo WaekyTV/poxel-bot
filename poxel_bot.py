@@ -219,20 +219,13 @@ def format_time_left(time_str, is_started):
     else:
         delta = time_utc - now_utc
 
-    if delta.total_seconds() < 0:
-        # Affiche le temps écoulé si l'événement a déjà commencé
-        seconds = abs(int(delta.total_seconds()))
-        minutes, seconds = divmod(seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        days, hours = divmod(hours, 24)
+    # Si l'événement est déjà terminé, on affiche "FINI"
+    if delta.total_seconds() < 0 and is_started:
+        return "TERMINÉ"
 
-        if days > 0:
-            return f"FINI IL Y A {days} jour(s), {hours} heure(s)"
-        if hours > 0:
-            return f"FINI IL Y A {hours} heure(s), {minutes} minute(s)"
-        if minutes > 0:
-            return f"FINI IL Y A {minutes} minute(s), {seconds} seconde(s)"
-        return f"FINI IL Y A {seconds} seconde(s)"
+    # Affiche le temps écoulé si l'événement a déjà commencé
+    if delta.total_seconds() < 0:
+        return "À COMMENCÉ"
 
     # Affiche le temps restant en secondes, minutes, heures et jours
     days = delta.days
@@ -326,10 +319,10 @@ async def on_ready():
 # --- GESTION DES COMMANDES ---
 
 @bot.command(name="create_event")
-async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, game_participants_str: str, event_name: str):
+async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, event_name: str):
     """
     Crée un événement pour le jour même.
-    Syntaxe: !create_event 21h30 10min @role #annonce #salle 10 "pseudonyme" "nom_evenement"
+    Syntaxe: !create_event 21h30 10min @role #annonce #salle 10 1 "nom_evenement"
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
@@ -370,6 +363,11 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         await ctx.message.delete(delay=120)
         return
 
+    if min_participants > max_participants:
+        await ctx.send("Le nombre minimum de participants ne peut pas être supérieur au nombre maximum.", delete_after=120)
+        await ctx.message.delete(delay=120)
+        return
+
     event_data = {
         "start_time": start_time_utc.isoformat(),
         "end_time": (start_time_utc + duration).isoformat(),
@@ -377,6 +375,7 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         "announcement_channel_id": announcement_channel.id,
         "waiting_channel_id": waiting_channel.id,
         "max_participants": max_participants,
+        "min_participants": min_participants,
         "participants": [],
         "is_started": False,
         "message_id": None
@@ -414,11 +413,11 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     await ctx.message.delete(delay=120)
 
 @bot.command(name="create_event_plan")
-async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, game_participants_str: str, event_name: str):
+async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, min_participants: int, event_name: str):
     """
     Crée un événement planifié pour une date future.
     Identique à !create_event mais avec une date en plus.
-    Syntaxe: !create_event_plan JJ/MM/AAAA 21h30 10min @role #annonce #salle 10 "pseudonyme" "nom_evenement"
+    Syntaxe: !create_event_plan JJ/MM/AAAA 21h30 10min @role #annonce #salle 10 1 "nom_evenement"
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
@@ -464,6 +463,11 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
         await ctx.send("Erreur de format pour la date, l'heure ou la durée. Utilisez le format 'JJ/MM/AAAA HHhMM' et 'Xmin'/'Xh'.", delete_after=120)
         await ctx.message.delete(delay=120)
         return
+    
+    if min_participants > max_participants:
+        await ctx.send("Le nombre minimum de participants ne peut pas être supérieur au nombre maximum.", delete_after=120)
+        await ctx.message.delete(delay=120)
+        return
         
     event_data = {
         "start_time": start_time_utc.isoformat(),
@@ -472,6 +476,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
         "announcement_channel_id": announcement_channel.id,
         "waiting_channel_id": waiting_channel.id,
         "max_participants": max_participants,
+        "min_participants": min_participants,
         "participants": [],
         "is_started": False,
         "message_id": None
@@ -627,7 +632,8 @@ async def check_events():
         
         # Logique pour le démarrage de l'événement et la clôture des inscriptions
         if not event_data.get('is_started') and now_utc >= start_time_utc:
-            if len(event_data['participants']) < 1:
+            # Annulation de l'événement si le nombre minimum de participants n'est pas atteint
+            if len(event_data['participants']) < event_data['min_participants']:
                 channel = bot.get_channel(event_data['announcement_channel_id'])
                 if channel:
                     await channel.send(f"@everyone ❌ **ANNULATION:** L'événement **{event_name}** a été annulé car le nombre de participants minimum n'a pas été atteint.")
@@ -652,6 +658,7 @@ async def check_events():
                     await member.send(f"🎉 **Félicitations** ! L'événement `{event_name}` a démarré. Le rôle `{role.name}` vous a été attribué. Rendez-vous dans le salon <#{event_data['waiting_channel_id']}>.")
                     
             if channel:
+                # Ajout de la mention @everyone pour indiquer que les inscriptions sont closes
                 await channel.send(f"@everyone L'événement **{event_name}** a officiellement commencé ! Les inscriptions sont closes et le rôle a été attribué aux participants.")
             
             # Mise à jour immédiate de l'embed pour la transition
@@ -685,9 +692,9 @@ async def check_events():
         # Mise à jour de l'embed en temps réel
         await update_event_embed(bot, event_name)
 
-
     for event_name in events_to_delete:
-        del db['events'][event_name]
+        if event_name in db['events']:
+            del db['events'][event_name]
         
     save_events(db)
 
