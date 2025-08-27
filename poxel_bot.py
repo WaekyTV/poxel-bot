@@ -5,6 +5,7 @@ import datetime
 import asyncio
 import os
 import json
+import pytz # Nouvelle importation pour la gestion des fuseaux horaires
 
 # Importation et configuration de Flask pour l'hébergement
 from flask import Flask
@@ -26,6 +27,11 @@ BOT_PREFIX = "!"
 # Définition des couleurs pour l'embed, comme demandé
 NEON_PURPLE = 0x6441a5
 NEON_BLUE = 0x027afa
+
+# Définition du fuseau horaire de l'utilisateur (France métropolitaine)
+USER_TIMEZONE = pytz.timezone('Europe/Paris')
+# Définition du fuseau horaire du serveur (UTC par convention)
+SERVER_TIMEZONE = pytz.utc
 
 # --- DATABASE (MAQUETTE) ---
 # En production, il faudrait utiliser le SDK Firebase pour une base de données réelle.
@@ -205,9 +211,10 @@ def format_time_left(end_time_str):
     """
     Formate le temps restant avant le début ou la fin de l'événement.
     """
-    end_time = datetime.datetime.fromisoformat(end_time_str)
-    now = datetime.datetime.now()
-    delta = end_time - now
+    # Utilise le fuseau horaire du serveur pour toutes les comparaisons
+    end_time_utc = datetime.datetime.fromisoformat(end_time_str).replace(tzinfo=SERVER_TIMEZONE)
+    now_utc = datetime.datetime.now(SERVER_TIMEZONE)
+    delta = end_time_utc - now_utc
     
     if delta.total_seconds() < 0:
         return f"FINI IL Y A {abs(int(delta.total_seconds() // 60))} minutes"
@@ -304,25 +311,31 @@ async def on_ready():
 async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, game_participants_str: str, event_name: str):
     """
     Crée un événement pour le jour même.
-    Syntaxe: !create_event 21h30 1h @role #annonce #salle 10 "pseudonyme" "nom_evenement"
+    Syntaxe: !create_event 21h30 10min @role #annonce #salle 10 "pseudonyme" "nom_evenement"
     """
-    # Vérification des droits d'administration (exemple simple)
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
-    # Vérification de l'unicité de l'événement
     if event_name in db['events']:
         await ctx.send(f"Un événement nommé `{event_name}` existe déjà. Veuillez en terminer l'ancien ou choisir un autre nom.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
-    # Parsing de l'heure et de la durée
     try:
+        # Création d'un objet datetime "naïf" (sans fuseau horaire)
         now = datetime.datetime.now()
         start_hour, start_minute = map(int, start_time_str.split('h'))
-        start_time = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        start_time_naive = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        
+        # Localisation de l'heure saisie dans le fuseau horaire de l'utilisateur
+        start_time_localized = USER_TIMEZONE.localize(start_time_naive)
+        
+        # Conversion de l'heure de début en UTC pour le stockage et la logique
+        start_time_utc = start_time_localized.astimezone(SERVER_TIMEZONE)
 
-        duration_unit = duration_str[-3:].lower() # 'min' ou 'h'
+        duration_unit = duration_str[-3:].lower()
         duration_value = int(duration_str[:-3])
 
         if duration_unit == 'min':
@@ -331,21 +344,22 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
             duration = datetime.timedelta(hours=duration_value)
         else:
             await ctx.send("Le format de durée doit être 'Xmin' ou 'Xh'.", delete_after=120)
+            await ctx.message.delete(delay=120)
             return
 
-        # Validation de l'heure de début
-        if start_time < now:
+        if start_time_utc < datetime.datetime.now(SERVER_TIMEZONE):
             await ctx.send("L'heure de début de l'événement est déjà passée. Veuillez choisir une heure future.", delete_after=120)
+            await ctx.message.delete(delay=120)
             return
 
     except (ValueError, IndexError):
         await ctx.send("Erreur de format pour l'heure ou la durée. Utilisez le format 'HHhMM' et 'Xmin'/'Xh'.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
-    # Création des données de l'événement
     event_data = {
-        "start_time": start_time.isoformat(),
-        "end_time": (start_time + duration).isoformat(),
+        "start_time": start_time_utc.isoformat(),
+        "end_time": (start_time_utc + duration).isoformat(),
         "role_id": role.id,
         "announcement_channel_id": announcement_channel.id,
         "waiting_channel_id": waiting_channel.id,
@@ -355,7 +369,6 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         "message_id": None
     }
     
-    # Création et envoi de l'embed
     embed = discord.Embed(
         title=f"NEW EVENT: {event_name}",
         description=f"""
@@ -374,15 +387,12 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=False)
     embed.add_field(name=f"PARTICIPANTS ({len(event_data['participants'])}/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     
-    # Ajout de l'image et du footer
     embed.set_footer(text="Style 8-bit futuriste, néon")
     embed.set_image(url="https://i.imgur.com/uCgE04g.gif")
     
-    # Envoi du message avec les boutons
     view = EventButtonsView(bot, event_name, event_data)
     message = await announcement_channel.send(content="@everyone", embed=embed, view=view)
     
-    # Enregistrement du message ID pour les futures mises à jour
     event_data['message_id'] = message.id
     db['events'][event_name] = event_data
     save_events(db)
@@ -395,23 +405,30 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
     """
     Crée un événement planifié pour une date future.
     Identique à !create_event mais avec une date en plus.
-    Syntaxe: !create_event_plan JJ/MM/AAAA 21h30 1h @role #annonce #salle 10 "pseudonyme" "nom_evenement"
+    Syntaxe: !create_event_plan JJ/MM/AAAA 21h30 10min @role #annonce #salle 10 "pseudonyme" "nom_evenement"
     """
-    # Vérification des droits d'administration (exemple simple)
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
-    # Vérification de l'unicité de l'événement
     if event_name in db['events']:
         await ctx.send(f"Un événement nommé `{event_name}` existe déjà. Veuillez en terminer l'ancien ou choisir un autre nom.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
-    # Parsing de la date, l'heure et la durée
     try:
         day, month, year = map(int, date_str.split('/'))
         start_hour, start_minute = map(int, start_time_str.split('h'))
-        start_time = datetime.datetime(year, month, day, start_hour, start_minute)
+        
+        # Création d'un objet datetime "naïf" (sans fuseau horaire)
+        start_time_naive = datetime.datetime(year, month, day, start_hour, start_minute)
+
+        # Localisation de l'heure saisie dans le fuseau horaire de l'utilisateur
+        start_time_localized = USER_TIMEZONE.localize(start_time_naive)
+
+        # Conversion de l'heure de début en UTC pour le stockage et la logique
+        start_time_utc = start_time_localized.astimezone(SERVER_TIMEZONE)
 
         duration_unit = duration_str[-3:].lower()
         duration_value = int(duration_str[:-3])
@@ -422,20 +439,22 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
             duration = datetime.timedelta(hours=duration_value)
         else:
             await ctx.send("Le format de durée doit être 'Xmin' ou 'Xh'.", delete_after=120)
+            await ctx.message.delete(delay=120)
             return
 
-        if start_time < datetime.datetime.now():
+        if start_time_utc < datetime.datetime.now(SERVER_TIMEZONE):
             await ctx.send("La date et l'heure de l'événement sont déjà passées. Veuillez choisir une date future.", delete_after=120)
+            await ctx.message.delete(delay=120)
             return
 
     except (ValueError, IndexError):
         await ctx.send("Erreur de format pour la date, l'heure ou la durée. Utilisez le format 'JJ/MM/AAAA HHhMM' et 'Xmin'/'Xh'.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
         
-    # Création des données de l'événement
     event_data = {
-        "start_time": start_time.isoformat(),
-        "end_time": (start_time + duration).isoformat(),
+        "start_time": start_time_utc.isoformat(),
+        "end_time": (start_time_utc + duration).isoformat(),
         "role_id": role.id,
         "announcement_channel_id": announcement_channel.id,
         "waiting_channel_id": waiting_channel.id,
@@ -445,7 +464,6 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
         "message_id": None
     }
     
-    # Création et envoi de l'embed
     embed = discord.Embed(
         title=f"NEW EVENT: {event_name}",
         description=f"""
@@ -464,15 +482,12 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
     embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=False)
     embed.add_field(name=f"PARTICIPANTS ({len(event_data['participants'])}/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     
-    # Ajout de l'image et du footer
     embed.set_footer(text="Style 8-bit futuriste, néon")
     embed.set_image(url="https://i.imgur.com/uCgE04g.gif")
     
-    # Envoi du message avec les boutons
     view = EventButtonsView(bot, event_name, event_data)
     message = await announcement_channel.send(content="@everyone", embed=embed, view=view)
     
-    # Enregistrement du message ID pour les futures mises à jour
     event_data['message_id'] = message.id
     db['events'][event_name] = event_data
     save_events(db)
@@ -487,15 +502,16 @@ async def end_event(ctx, event_name: str):
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
     if event_name not in db['events']:
         await ctx.send(f"L'événement `{event_name}` n'existe pas.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
         
     event_data = db['events'][event_name]
     
-    # Suppression du rôle pour tous les participants
     for participant in event_data['participants']:
         member = ctx.guild.get_member(participant['id'])
         if member:
@@ -506,11 +522,9 @@ async def end_event(ctx, event_name: str):
             except Exception as e:
                 print(f"Impossible de retirer le rôle du membre {member.id}: {e}")
                 
-    # Suppression de l'événement de la base de données
     del db['events'][event_name]
     save_events(db)
     
-    # Envoi de la notification de fin
     channel = bot.get_channel(event_data['announcement_channel_id'])
     if channel:
         await channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants !")
@@ -525,10 +539,12 @@ async def tirage(ctx, event_name: str):
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
     if event_name not in db['events']:
         await ctx.send(f"L'événement `{event_name}` n'existe pas.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
         
     event_data = db['events'][event_name]
@@ -536,9 +552,9 @@ async def tirage(ctx, event_name: str):
     
     if not participants:
         await ctx.send(f"Il n'y a pas de participants pour le tirage au sort de l'événement `{event_name}`.", delete_after=120)
+        await ctx.message.delete(delay=120)
         return
 
-    # Tirage au sort d'un gagnant aléatoire
     import random
     winner = random.choice(participants)
     
@@ -583,11 +599,12 @@ async def check_events():
     events_to_delete = []
     
     for event_name, event_data in list(db['events'].items()):
-        start_time = datetime.datetime.fromisoformat(event_data['start_time'])
-        now = datetime.datetime.now()
+        # Utilise le fuseau horaire du serveur pour la comparaison
+        start_time_utc = datetime.datetime.fromisoformat(event_data['start_time']).replace(tzinfo=SERVER_TIMEZONE)
+        now_utc = datetime.datetime.now(SERVER_TIMEZONE)
         
         # Logique pour le rappel de 30 minutes avant le début
-        if not event_data.get('reminded_30m') and (start_time - now).total_seconds() <= 30 * 60:
+        if not event_data.get('reminded_30m') and (start_time_utc - now_utc).total_seconds() <= 30 * 60:
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if channel:
                 await channel.send(f"@everyone ⏰ **RAPPEL:** L'événement **{event_name}** commence dans 30 minutes ! N'oubliez pas de vous inscrire.")
@@ -595,8 +612,7 @@ async def check_events():
                 save_events(db)
         
         # Logique pour le démarrage de l'événement
-        if not event_data.get('is_started') and now >= start_time:
-            # Vérification du nombre minimum de participants (ici, on prend 1 comme exemple)
+        if not event_data.get('is_started') and now_utc >= start_time_utc:
             if len(event_data['participants']) < 1:
                 channel = bot.get_channel(event_data['announcement_channel_id'])
                 if channel:
@@ -607,19 +623,16 @@ async def check_events():
             event_data['is_started'] = True
             save_events(db)
             
-            # Suppression de l'embed et de ses boutons
             channel = bot.get_channel(event_data['announcement_channel_id'])
             try:
                 message = await channel.fetch_message(event_data['message_id'])
                 await message.delete()
             except discord.NotFound:
-                pass # Le message a déjà été supprimé
+                pass 
             
-            # Envoi des notifications de démarrage
             for participant in event_data['participants']:
                 member = bot.get_guild(channel.guild.id).get_member(participant['id'])
                 if member:
-                    # Attribution du rôle temporaire
                     role = member.guild.get_role(event_data['role_id'])
                     if role:
                         try:
@@ -627,20 +640,18 @@ async def check_events():
                         except Exception as e:
                             print(f"Impossible d'ajouter le rôle à {member.display_name}: {e}")
                             
-                    # Envoi d'un message privé
                     await member.send(f"🎉 **Félicitations** ! L'événement `{event_name}` a démarré. Le rôle `{role.name}` vous a été attribué. Rendez-vous dans le salon <#{event_data['waiting_channel_id']}>.")
                     
             if channel:
                 await channel.send(f"@everyone L'événement **{event_name}** a officiellement commencé ! Les inscriptions sont closes et le rôle a été attribué aux participants.")
 
         # Logique pour la fin de l'événement
-        end_time = datetime.datetime.fromisoformat(event_data['end_time'])
-        if now >= end_time and event_data.get('is_started'):
+        end_time_utc = datetime.datetime.fromisoformat(event_data['end_time']).replace(tzinfo=SERVER_TIMEZONE)
+        if now_utc >= end_time_utc and event_data.get('is_started'):
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if channel:
                 await channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants ! 🎉")
             
-            # Suppression du rôle pour tous les participants
             for participant in event_data['participants']:
                 member = bot.get_guild(channel.guild.id).get_member(participant['id'])
                 if member:
@@ -657,19 +668,13 @@ async def check_events():
         if not event_data.get('is_started'):
             await update_event_embed(bot, event_name)
 
-    # Suppression des événements terminés de la base de données
     for event_name in events_to_delete:
         del db['events'][event_name]
         
     save_events(db)
 
-# --- DÉMARRAGE DU BOT ET DU SERVEUR FLASK ---
 if __name__ == "__main__":
-    # Démarrage du serveur Flask dans un thread séparé
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
 
-    # Démarrage du bot Discord
-    # Remplacez 'YOUR_BOT_TOKEN' par votre propre token Discord
-    # Vous pouvez utiliser un fichier .env pour stocker votre token
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
