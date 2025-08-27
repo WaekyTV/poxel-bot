@@ -154,8 +154,8 @@ class EventButtonsView(View):
     async def on_list_click(self, interaction: discord.Interaction):
         """Affiche la liste des événements en cours."""
         active_events = [
-            f"- `{name}` (début dans: {format_time_left(data['start_time'])})"
-            for name, data in db['events'].items() if not data.get('is_started')
+            f"- `{name}` (début dans: {format_time_left(data['start_time'], data.get('is_started'))})"
+            for name, data in db['events'].items()
         ]
         
         if not active_events:
@@ -207,18 +207,34 @@ class ParticipantModal(discord.ui.Modal, title="Pseudo pour le jeu"):
 
 # --- FONCTIONS UTILES ---
 
-def format_time_left(end_time_str):
+def format_time_left(time_str, is_started):
     """
     Formate le temps restant avant le début ou la fin de l'événement.
     """
-    # Utilise le fuseau horaire du serveur pour toutes les comparaisons
-    end_time_utc = datetime.datetime.fromisoformat(end_time_str).replace(tzinfo=SERVER_TIMEZONE)
+    time_utc = datetime.datetime.fromisoformat(time_str).replace(tzinfo=SERVER_TIMEZONE)
     now_utc = datetime.datetime.now(SERVER_TIMEZONE)
-    delta = end_time_utc - now_utc
     
+    if is_started:
+        delta = time_utc - now_utc
+    else:
+        delta = time_utc - now_utc
+
     if delta.total_seconds() < 0:
-        return f"FINI IL Y A {abs(int(delta.total_seconds() // 60))} minutes"
-        
+        # Affiche le temps écoulé si l'événement a déjà commencé
+        seconds = abs(int(delta.total_seconds()))
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        days, hours = divmod(hours, 24)
+
+        if days > 0:
+            return f"FINI IL Y A {days} jour(s), {hours} heure(s)"
+        if hours > 0:
+            return f"FINI IL Y A {hours} heure(s), {minutes} minute(s)"
+        if minutes > 0:
+            return f"FINI IL Y A {minutes} minute(s), {seconds} seconde(s)"
+        return f"FINI IL Y A {seconds} seconde(s)"
+
+    # Affiche le temps restant en secondes, minutes, heures et jours
     days = delta.days
     hours, remainder = divmod(delta.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -264,12 +280,14 @@ async def update_event_embed(bot, event_name):
         embed.add_field(name="POINT DE RALLIEMENT", value=f"<#{event['waiting_channel_id']}>", inline=True)
         embed.add_field(name="RÔLE ATTRIBUÉ", value=f"<@&{event['role_id']}>", inline=True)
         
-        # Gestion du temps
-        start_time = datetime.datetime.fromisoformat(event['start_time'])
+        # Gestion du temps et des inscriptions
         if not event.get('is_started'):
-            embed.add_field(name="DÉBUT DANS", value=format_time_left(event['start_time']), inline=False)
+            embed.add_field(name="DÉBUT DANS", value=format_time_left(event['start_time'], event.get('is_started')), inline=False)
+            view = EventButtonsView(bot, event_name, event)
         else:
-            embed.add_field(name="TEMPS RESTANT", value=format_time_left(event['end_time']), inline=False)
+            embed.add_field(name="TEMPS RESTANT", value=format_time_left(event['end_time'], event.get('is_started')), inline=False)
+            embed.description = "L'événement est en cours. Les inscriptions sont closes."
+            view = None
 
         # Liste des participants
         participants_list = "\n".join([f"- **{p['name']}** ({p['pseudo']})" for p in event['participants']])
@@ -283,7 +301,7 @@ async def update_event_embed(bot, event_name):
         # Remplacer cette URL par l'URL de votre GIF
         embed.set_image(url="https://i.imgur.com/uCgE04g.gif") 
         
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, view=view)
         
     except discord.NotFound:
         # Le message a été supprimé, il faut nettoyer la base de données
@@ -347,11 +365,6 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
             await ctx.message.delete(delay=120)
             return
 
-        if start_time_utc < datetime.datetime.now(SERVER_TIMEZONE):
-            await ctx.send("L'heure de début de l'événement est déjà passée. Veuillez choisir une heure future.", delete_after=120)
-            await ctx.message.delete(delay=120)
-            return
-
     except (ValueError, IndexError):
         await ctx.send("Erreur de format pour l'heure ou la durée. Utilisez le format 'HHhMM' et 'Xmin'/'Xh'.", delete_after=120)
         await ctx.message.delete(delay=120)
@@ -384,7 +397,7 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     )
     embed.add_field(name="POINT DE RALLIEMENT", value=waiting_channel.mention, inline=True)
     embed.add_field(name="RÔLE ATTRIBUÉ", value=role.mention, inline=True)
-    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=False)
+    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time'], event_data['is_started']), inline=False)
     embed.add_field(name=f"PARTICIPANTS ({len(event_data['participants'])}/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     
     embed.set_footer(text="Style 8-bit futuriste, néon")
@@ -479,7 +492,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
     )
     embed.add_field(name="POINT DE RALLIEMENT", value=waiting_channel.mention, inline=True)
     embed.add_field(name="RÔLE ATTRIBUÉ", value=role.mention, inline=True)
-    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=False)
+    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time'], event_data['is_started']), inline=False)
     embed.add_field(name=f"PARTICIPANTS ({len(event_data['participants'])}/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     
     embed.set_footer(text="Style 8-bit futuriste, néon")
@@ -591,10 +604,10 @@ async def helpoxel(ctx, command_name: str = None):
 
 # --- TÂCHES PLANIFIÉES ---
 
-@tasks.loop(minutes=1)
+@tasks.loop(seconds=1) # Boucle toutes les secondes
 async def check_events():
     """
-    Boucle de vérification qui s'exécute toutes les minutes pour gérer les événements en temps réel.
+    Boucle de vérification qui s'exécute toutes les secondes pour gérer les événements en temps réel.
     """
     events_to_delete = []
     
@@ -602,16 +615,17 @@ async def check_events():
         # Utilise le fuseau horaire du serveur pour la comparaison
         start_time_utc = datetime.datetime.fromisoformat(event_data['start_time']).replace(tzinfo=SERVER_TIMEZONE)
         now_utc = datetime.datetime.now(SERVER_TIMEZONE)
-        
+        end_time_utc = datetime.datetime.fromisoformat(event_data['end_time']).replace(tzinfo=SERVER_TIMEZONE)
+
         # Logique pour le rappel de 30 minutes avant le début
-        if not event_data.get('reminded_30m') and (start_time_utc - now_utc).total_seconds() <= 30 * 60:
+        if not event_data.get('is_started') and not event_data.get('reminded_30m') and (start_time_utc - now_utc).total_seconds() <= 30 * 60 and start_time_utc > now_utc:
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if channel:
                 await channel.send(f"@everyone ⏰ **RAPPEL:** L'événement **{event_name}** commence dans 30 minutes ! N'oubliez pas de vous inscrire.")
                 event_data['reminded_30m'] = True
                 save_events(db)
         
-        # Logique pour le démarrage de l'événement
+        # Logique pour le démarrage de l'événement et la clôture des inscriptions
         if not event_data.get('is_started') and now_utc >= start_time_utc:
             if len(event_data['participants']) < 1:
                 channel = bot.get_channel(event_data['announcement_channel_id'])
@@ -624,11 +638,6 @@ async def check_events():
             save_events(db)
             
             channel = bot.get_channel(event_data['announcement_channel_id'])
-            try:
-                message = await channel.fetch_message(event_data['message_id'])
-                await message.delete()
-            except discord.NotFound:
-                pass 
             
             for participant in event_data['participants']:
                 member = bot.get_guild(channel.guild.id).get_member(participant['id'])
@@ -644,9 +653,11 @@ async def check_events():
                     
             if channel:
                 await channel.send(f"@everyone L'événement **{event_name}** a officiellement commencé ! Les inscriptions sont closes et le rôle a été attribué aux participants.")
+            
+            # Mise à jour immédiate de l'embed pour la transition
+            await update_event_embed(bot, event_name)
 
         # Logique pour la fin de l'événement
-        end_time_utc = datetime.datetime.fromisoformat(event_data['end_time']).replace(tzinfo=SERVER_TIMEZONE)
         if now_utc >= end_time_utc and event_data.get('is_started'):
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if channel:
@@ -661,12 +672,19 @@ async def check_events():
                             await member.remove_roles(role)
                     except Exception as e:
                         print(f"Impossible de retirer le rôle du membre {member.id}: {e}")
-                        
+            
+            try:
+                # Suppression de l'embed final
+                message = await channel.fetch_message(event_data['message_id'])
+                await message.delete()
+            except discord.NotFound:
+                pass
+
             events_to_delete.append(event_name)
         
         # Mise à jour de l'embed en temps réel
-        if not event_data.get('is_started'):
-            await update_event_embed(bot, event_name)
+        await update_event_embed(bot, event_name)
+
 
     for event_name in events_to_delete:
         del db['events'][event_name]
