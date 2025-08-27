@@ -6,11 +6,8 @@ import asyncio
 import os
 import json
 import pytz
-import sys
-import io
-
-# Assurez-vous que l'encodage par défaut est UTF-8
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+from flask import Flask
+from threading import Thread
 
 # Configuration du bot
 intents = discord.Intents.all()
@@ -48,6 +45,19 @@ def save_events(data):
 
 # Variable globale pour la base de données (simulée)
 db = load_events()
+
+# --- FLASK SERVER POUR LA PERSISTANCE (RENDER) ---
+# Ceci est nécessaire pour que le bot reste en ligne sur des services comme Render.
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Poxel Bot is running!"
+
+def run_flask():
+    """Démarre le serveur Flask."""
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
 
 # --- CLASSES DE BOUTONS ET DE VUES ---
 
@@ -640,7 +650,9 @@ async def check_events():
         
     save_events(db)
 
-# Exécution du bot
+# Exécution du bot et du serveur Flask
 if __name__ == "__main__":
-    # Lancement du bot
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
