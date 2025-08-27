@@ -13,12 +13,19 @@ import pytz
 import random
 from flask import Flask, request
 from threading import Thread
+import json
 
 # --- Initialisation de Firebase ---
-# Le fichier JSON de votre clé de service Firebase doit être placé dans le même répertoire que le bot.
-FIREBASE_KEY_PATH = "firebase_key.json"
+# Tente de charger les identifiants de Firebase à partir d'une variable d'environnement
+# S'il ne les trouve pas, il cherche un fichier "firebase_key.json"
 try:
-    cred = credentials.Certificate(FIREBASE_KEY_PATH)
+    if os.getenv("FIREBASE_CREDENTIALS"):
+        cred_dict = json.loads(os.getenv("FIREBASE_CREDENTIALS"))
+        cred = credentials.Certificate(cred_dict)
+    else:
+        FIREBASE_KEY_PATH = "firebase_key.json"
+        cred = credentials.Certificate(FIREBASE_KEY_PATH)
+    
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("Firebase connecté.")
