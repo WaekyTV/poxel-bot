@@ -555,10 +555,7 @@ async def tirage(ctx, contest_name: str):
         participants = contest_data['participants']
         channel_id = contest_data['announcement_channel_id']
     else:
-        # Tenter de trouver le concours dans les données sauvegardées de concours terminés si besoin.
-        # Pour cet exemple, on se base sur la structure actuelle qui les supprime.
-        # Si vous voulez un historique, il faudrait une base de données séparée.
-        await ctx.send(f"Le concours `{contest_name}` n'existe pas ou n'est plus en cours.", delete_after=120)
+        await ctx.send(f"Le concours `{contest_name}` n'existe pas ou n'est plus en cours. Assurez-vous d'utiliser le nom exact du concours.", delete_after=120)
         return
 
     channel = bot.get_channel(channel_id)
@@ -574,29 +571,16 @@ async def tirage(ctx, contest_name: str):
     if channel:
         await channel.send(f"@everyone 🎉 **Félicitations à <@{winner_id}>** ! 🎉\nVous êtes le grand gagnant du tirage au sort pour le concours **{contest_name}** !")
     
-    # Envoi d'un message privé à l'administrateur
+    # Envoi d'un message privé à l'administrateur UNIQUEMENT
     try:
         admin_dm_message = f"🏆 **TIRAGE AU SORT TERMINÉ**\nLe concours `{contest_name}` a désigné un gagnant :\n- **Nom Discord :** {winner_name}\n- **ID Discord :** {winner_id}"
         await ctx.author.send(admin_dm_message)
         print(f"Message privé envoyé à l'administrateur pour le tirage au sort de {contest_name}.")
     except discord.Forbidden:
         print("Impossible d'envoyer un message privé à l'administrateur. Les DMs sont peut-être désactivés.")
-
-    # Envoi d'un message privé au gagnant
-    member = ctx.guild.get_member(winner_id)
-    if member:
-        try:
-            private_message = f"Félicitations, <@{winner_id}> !\n\nVous êtes le grand gagnant du concours **{contest_name}** !\n\nContactez l'administration pour réclamer votre prix."
-            embed_dm = discord.Embed(
-                title="🏆 VOUS AVEZ GAGNÉ UN CONCOURS !",
-                description=private_message,
-                color=NEON_PURPLE
-            )
-            embed_dm.set_footer(text="Message de Poxel Bot")
-            await member.send(embed=embed_dm)
-            print(f"Message privé envoyé au gagnant {member.name}.")
-        except discord.Forbidden:
-            print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
+        await ctx.send("Impossible de vous envoyer la notification privée. Assurez-vous d'avoir activé les messages privés sur ce serveur.", delete_after=120)
+    
+    # Le bot ne contacte plus le gagnant par message privé, car c'est maintenant à l'administrateur de le faire.
 
 @bot.command(name="concours")
 @commands.has_permissions(administrator=True)
@@ -795,6 +779,21 @@ async def check_events():
         end_time_utc = datetime.datetime.fromisoformat(event_data['end_time']).replace(tzinfo=SERVER_TIMEZONE)
         if now_utc >= end_time_utc and event_data.get('is_started'):
             channel = bot.get_channel(event_data['announcement_channel_id'])
+            
+            # Mise à jour de l'embed pour indiquer la fin de l'événement
+            if channel and event_data['message_id']:
+                try:
+                    message = await channel.fetch_message(event_data['message_id'])
+                    embed = message.embeds[0]
+                    embed.title = f"Événement terminé: {event_name}"
+                    embed.description = "Cet événement est maintenant terminé. Merci à tous les participants !"
+                    embed.clear_fields()
+                    embed.add_field(name="ÉTAT", value="TERMINÉ", inline=False)
+                    embed.set_image(url="")
+                    await message.edit(embed=embed, view=None)
+                except discord.NotFound:
+                    print(f"Message d'événement non trouvé pour {event_name}.")
+            
             if channel: await channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants ! 🎉")
             
             for participant in event_data['participants']:
@@ -830,8 +829,7 @@ async def check_contests():
         if now_utc >= end_time_utc:
             channel = bot.get_channel(contest_data['announcement_channel_id'])
             message_id = contest_data['message_id']
-            participants = contest_data['participants']
-
+            
             # Mise à jour de l'embed pour indiquer la fin du concours
             if channel and message_id:
                 try:
@@ -845,33 +843,10 @@ async def check_contests():
                     await message.edit(embed=embed, view=None)
                 except discord.NotFound:
                     pass
-
-            if participants:
-                winner_data = random.choice(participants)
-                winner_id = winner_data['id']
-                if channel:
-                    await channel.send(f"@everyone 🎉 **Félicitations à <@{winner_id}>** ! 🎉\nLe concours **{contest_name}** est terminé et vous êtes le grand gagnant !")
-                member = bot.get_guild(channel.guild.id).get_member(winner_id)
-                if member:
-                    try:
-                        private_message = f"Félicitations, <@{winner_id}> !\n\nVous êtes le grand gagnant du concours **{contest_name}** !\n\nContactez l'administration pour réclamer votre prix."
-                        embed_dm = discord.Embed(
-                            title="🏆 VOUS AVEZ GAGNÉ UN CONCOURS !",
-                            description=private_message,
-                            color=NEON_PURPLE
-                        )
-                        embed_dm.set_footer(text="Message de Poxel Bot")
-                        await member.send(embed=embed_dm)
-                    except discord.Forbidden:
-                        print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
-            else:
-                if channel:
-                    await channel.send(f"Le concours `{contest_name}` est terminé mais n'a pas de participants.")
             
-            contests_to_delete.append(contest_name)
-
-    for contest_name in contests_to_delete:
-        del db['contests'][contest_name]
+            # Ne supprime pas le concours des données pour que la commande !tirage puisse être utilisée plus tard
+            # et ne fait plus le tirage automatiquement ici
+            
     save_data(db)
 
 
