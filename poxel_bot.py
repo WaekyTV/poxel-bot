@@ -52,11 +52,10 @@ def run_flask():
     """Démarre le serveur Flask sur un thread séparé."""
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
-# --- Fonctions utilitaires pour le formatage et la gestion ---
+# --- Fonctions utlitaires pour le formatage et la gestion ---
 def format_time_left(end_time_str):
     """
-    Formate le temps restant en jours, heures, minutes.
-    Arrondit à la minute supérieure pour un affichage plus clair.
+    Formate le temps restant en jours, heures, minutes et secondes.
     """
     end_time_utc = datetime.datetime.fromisoformat(end_time_str).replace(tzinfo=SERVER_TIMEZONE)
     now_utc = datetime.datetime.now(SERVER_TIMEZONE)
@@ -76,21 +75,18 @@ def format_time_left(end_time_str):
             return f"FINI IL Y A {minutes} minute(s), {seconds} seconde(s)"
         return f"FINI IL Y A {seconds} seconde(s)"
 
-    # Arrondir à la minute supérieure pour un affichage plus lisible
-    total_minutes = math.ceil(total_seconds / 60)
-    
-    if total_minutes >= 60 * 24:
-        days = total_minutes // (60 * 24)
-        hours = (total_minutes % (60 * 24)) // 60
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+
+    if days > 0:
         return f"{days} jour(s), {hours} heure(s)"
-    elif total_minutes >= 60:
-        hours = total_minutes // 60
-        minutes = total_minutes % 60
+    elif hours > 0:
         return f"{hours} heure(s), {minutes} minute(s)"
-    elif total_minutes > 0:
-        return f"{total_minutes} minute(s)"
+    elif minutes > 0:
+        return f"{minutes} minute(s), {seconds} seconde(s)"
     else:
-        return "Moins d'une minute"
+        return f"{seconds} seconde(s)"
 
 async def update_event_embed(bot, event_name, interaction=None):
     """
@@ -131,7 +127,8 @@ async def update_event_embed(bot, event_name, interaction=None):
             inline=False
         )
         embed.set_footer(text="Style 8-bit futuriste, néon")
-        embed.set_image(url="https://i.imgur.com/uCgE04g.gif") 
+        # C'est ici que vous changez le GIF pour les mises à jour de l'événement
+        embed.set_image(url="https://cdn.lospec.com/gallery/loading-727267.gif ") 
         
         # Mise à jour des boutons dans la vue
         view = EventButtonsView(bot, event_name, event)
@@ -330,6 +327,7 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
 
     embed.add_field(name=f"PARTICIPANTS (0/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     embed.set_footer(text="Style 8-bit futuriste, néon")
+    # C'est ici que vous changez le GIF lors de la création de l'événement
     embed.set_image(url="https://i.imgur.com/uCgE04g.gif")
     
     view = EventButtonsView(bot, event_name, event_data)
@@ -581,7 +579,19 @@ async def check_events():
         if not event_data.get('is_started') and now_utc >= start_time_utc:
             channel = bot.get_channel(event_data['announcement_channel_id'])
             if len(event_data['participants']) < 1: # Minimum de participants
-                if channel: await channel.send(f"@everyone ❌ **ANNULATION:** L'événement **{event_name}** a été annulé car le nombre de participants minimum n'a pas été atteint.")
+                if channel:
+                    await channel.send(f"@everyone ❌ **ANNULATION:** L'événement **{event_name}** a été annulé car le nombre de participants minimum n'a pas été atteint.")
+                    try:
+                        message = await channel.fetch_message(event_data['message_id'])
+                        embed = message.embeds[0]
+                        embed.title = f"Événement annulé: {event_name}"
+                        embed.description = "Cet événement a été annulé car le nombre de participants minimum n'a pas été atteint."
+                        embed.clear_fields()
+                        embed.add_field(name="ÉTAT", value="ANNULÉ", inline=False)
+                        embed.set_image(url="https://i.imgur.com/uCgE04g.gif") # Optionnel : vous pouvez ajouter une image d'annulation si vous voulez
+                        await message.edit(embed=embed, view=None)
+                    except discord.NotFound:
+                        pass # Le message a déjà été supprimé
                 events_to_delete.append(event_name)
                 continue
                 
