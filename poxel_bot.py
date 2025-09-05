@@ -842,7 +842,7 @@ async def check_contests():
                         await channel.send(f"@everyone ❌ Le concours **{contest_name}** a été annulé car il n'y a eu aucun participant.")
                     except discord.NotFound:
                         pass
-                contests_to_delete.append(cont
+                contests_to_delete.append(contest_name)
             # Mise à jour de l'embed pour indiquer la fin du concours
             if channel and message_id:
                 try:
@@ -866,6 +866,7 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
 
 
 
