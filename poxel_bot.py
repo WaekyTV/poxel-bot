@@ -498,9 +498,10 @@ async def tirage(ctx, contest_name: str):
             )
             embed_dm.set_footer(text="Message de Poxel Bot")
             await member.send(embed=embed_dm)
-            print(f"Message privé envoyé au gagnant {member.name}.")
+            print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
         except discord.Forbidden:
             print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
+
 
 @bot.command(name="concours")
 @has_permissions(administrator=True)
@@ -705,6 +706,13 @@ async def check_contests():
             await update_contest_embed(bot, contest_name)
 
 if __name__ == "__main__":
+    # Vérification que la variable d'environnement TOKEN est bien définie
+    discord_token = os.environ.get('TOKEN')
+    if discord_token is None:
+        print("Erreur : La variable d'environnement 'TOKEN' n'a pas été trouvée.")
+        print("Veuillez vous assurer que le jeton de votre bot Discord est configuré en tant que variable d'environnement nommée 'TOKEN' sur votre plateforme d'hébergement (par exemple, dans les 'Environment Variables' de Render).")
+        exit()
+
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
-    bot.run(os.environ.get('TOKEN'))
+    bot.run(discord_token)
