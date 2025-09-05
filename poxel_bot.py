@@ -26,7 +26,7 @@ NEON_BLUE = 0x027afa
 NEON_GREEN = 0x00FF00
 USER_TIMEZONE = pytz.timezone('Europe/Paris')
 SERVER_TIMEZONE = pytz.utc
-DATABASE_FILE = 'data.json' # Renommé pour être plus générique
+DATABASE_FILE = 'data.json'
 
 # --- DATABASE (SIMULATION) ---
 def load_data():
@@ -128,6 +128,8 @@ class EventButtonsView(View):
             await interaction.response.send_message("Vous n'êtes pas inscrit à cet événement.", ephemeral=True, delete_after=120)
             return
             
+        was_full = self.current_participants >= self.max_participants
+            
         # Suppression du participant
         self.event_data['participants'] = [p for p in self.event_data['participants'] if p['id'] != user_id]
         save_data(db)
@@ -138,6 +140,12 @@ class EventButtonsView(View):
         # Mise à jour de l'embed
         await update_event_embed(self.bot, event_name)
         await interaction.response.send_message("Vous vous êtes désinscrit de l'événement.", ephemeral=True, delete_after=120)
+
+        # Annonce de la réouverture des inscriptions
+        if was_full and self.current_participants < self.max_participants:
+            channel = self.bot.get_channel(self.event_data['announcement_channel_id'])
+            if channel:
+                await channel.send(f"@everyone 📣 **INSCRIPTIONS RÉOUVERTES !** Il reste des places pour l'événement **{event_name}**.")
 
     async def on_list_click(self, interaction: discord.Interaction):
         """Affiche la liste des événements en cours."""
@@ -177,6 +185,8 @@ class ParticipantModal(Modal, title="Pseudo pour le jeu"):
         user = interaction.user
         game_pseudo = self.game_pseudo.value
         
+        was_full = self.view.current_participants >= self.view.max_participants
+            
         # Enregistrement du participant
         self.view.event_data['participants'].append({
             "id": user.id,
@@ -191,6 +201,12 @@ class ParticipantModal(Modal, title="Pseudo pour le jeu"):
         # Mise à jour de l'embed
         await update_event_embed(self.view.bot, self.event_name)
         await interaction.response.send_message(f"Vous avez été inscrit à l'événement `{self.event_name}` avec le pseudo `{game_pseudo}`.", ephemeral=True, delete_after=120)
+        
+        # Annonce de la fermeture des inscriptions
+        if not was_full and self.view.current_participants >= self.view.max_participants:
+            channel = self.view.bot.get_channel(self.view.event_data['announcement_channel_id'])
+            if channel:
+                await channel.send(f"@everyone 🛑 **INSCRIPTIONS CLOSES !** Le nombre maximum de participants a été atteint pour l'événement **{self.event_name}**.")
 
 # --- FONCTIONS UTILES ---
 
@@ -319,11 +335,12 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         return
 
     try:
-        now = datetime.datetime.now(USER_TIMEZONE)
+        now_paris = datetime.datetime.now(USER_TIMEZONE)
         start_hour, start_minute = map(int, start_time_str.split('h'))
-        start_time_naive = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        start_time_naive = now_paris.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
         
-        start_time_utc = start_time_naive.astimezone(SERVER_TIMEZONE)
+        # Localisation à l'heure de Paris puis conversion en UTC
+        start_time_utc = USER_TIMEZONE.localize(start_time_naive.replace(tzinfo=None)).astimezone(SERVER_TIMEZONE)
 
         duration_unit = duration_str[-3:].lower()
         duration_value = int(duration_str[:-3])
@@ -361,7 +378,7 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     
     embed = discord.Embed(
         title=f"NEW EVENT: {event_name}",
-        description=f"Rejoignez-nous pour un événement spécial !",
+        description="Rejoignez-nous pour un événement spécial !",
         color=NEON_PURPLE
     )
     embed.add_field(name="POINT DE RALLIEMENT", value=waiting_channel.mention, inline=True)
@@ -579,7 +596,7 @@ async def concours(ctx, date_fin: str, *, nom_concours: str):
     )
     embed.add_field(name="Date de fin", value=end_date_utc.astimezone(USER_TIMEZONE).strftime('%d/%m/%Y'), inline=True)
     embed.add_field(name="Nombre de participants", value="0", inline=True)
-    embed.set_image(url="https://i.imgur.com/vHqJ9Uf.gif") # Exemple de GIF pour les concours
+    embed.set_image(url="https://i.imgur.com/vHqJ9Uf.gif")
     
     class ContestView(View):
         def __init__(self, contest_name, timeout=None):
