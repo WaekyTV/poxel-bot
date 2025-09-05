@@ -8,6 +8,7 @@ import os
 import json
 import pytz
 import random
+import math
 
 # Importation et configuration de Flask pour l'hébergement sur Render
 from flask import Flask
@@ -53,14 +54,18 @@ def run_flask():
 
 # --- Fonctions utilitaires pour le formatage et la gestion ---
 def format_time_left(end_time_str):
-    """Formate le temps restant en jours, heures, minutes et secondes."""
+    """
+    Formate le temps restant en jours, heures, minutes.
+    Arrondit à la minute supérieure pour un affichage plus clair.
+    """
     end_time_utc = datetime.datetime.fromisoformat(end_time_str).replace(tzinfo=SERVER_TIMEZONE)
     now_utc = datetime.datetime.now(SERVER_TIMEZONE)
     delta = end_time_utc - now_utc
-
-    if delta.total_seconds() < 0:
-        seconds = abs(int(delta.total_seconds()))
-        minutes, seconds = divmod(seconds, 60)
+    total_seconds = int(delta.total_seconds())
+    
+    if total_seconds < 0:
+        total_seconds = abs(total_seconds)
+        minutes, seconds = divmod(total_seconds, 60)
         hours, minutes = divmod(minutes, 60)
         days, hours = divmod(hours, 24)
         if days > 0:
@@ -71,13 +76,21 @@ def format_time_left(end_time_str):
             return f"FINI IL Y A {minutes} minute(s), {seconds} seconde(s)"
         return f"FINI IL Y A {seconds} seconde(s)"
 
-    days, hours, minutes, seconds = delta.days, delta.seconds // 3600, (delta.seconds % 3600) // 60, delta.seconds % 60
-    parts = []
-    if days > 0: parts.append(f"{days} jour(s)")
-    if hours > 0: parts.append(f"{hours} heure(s)")
-    if minutes > 0: parts.append(f"{minutes} minute(s)")
-    if seconds > 0: parts.append(f"{seconds} seconde(s)")
-    return ", ".join(parts) or "Moins d'une seconde"
+    # Arrondir à la minute supérieure pour un affichage plus lisible
+    total_minutes = math.ceil(total_seconds / 60)
+    
+    if total_minutes >= 60 * 24:
+        days = total_minutes // (60 * 24)
+        hours = (total_minutes % (60 * 24)) // 60
+        return f"{days} jour(s), {hours} heure(s)"
+    elif total_minutes >= 60:
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        return f"{hours} heure(s), {minutes} minute(s)"
+    elif total_minutes > 0:
+        return f"{total_minutes} minute(s)"
+    else:
+        return "Moins d'une minute"
 
 async def update_event_embed(bot, event_name, interaction=None):
     """
@@ -157,10 +170,10 @@ class EventButtonsView(View):
         self.current_participants = len(self.event_data.get('participants', []))
 
         # Création des boutons
-        start_button = Button(label="PARTICIPER", style=discord.ButtonStyle.success, emoji="✅")
+        start_button = Button(label="START", style=discord.ButtonStyle.success, emoji="✅")
         start_button.callback = self.on_start_click
 
-        quit_button = Button(label="ANNULER", style=discord.ButtonStyle.danger, emoji="❌")
+        quit_button = Button(label="QUIT", style=discord.ButtonStyle.danger, emoji="❌")
         quit_button.callback = self.on_quit_click
 
         list_button = Button(label="Événements en cours", style=discord.ButtonStyle.secondary)
