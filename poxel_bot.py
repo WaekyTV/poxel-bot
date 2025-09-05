@@ -101,6 +101,10 @@ async def update_event_embed(bot, event_name, interaction=None):
         embed.add_field(name="RÔLE ATTRIBUÉ", value=f"<@&{event['role_id']}>", inline=True)
         
         if not event.get('is_started'):
+            # Affichage de l'heure exacte et du compte à rebours
+            start_time_utc = datetime.datetime.fromisoformat(event['start_time']).replace(tzinfo=SERVER_TIMEZONE)
+            start_time_paris = start_time_utc.astimezone(USER_TIMEZONE)
+            embed.add_field(name="DÉBUT PRÉVU", value=f"Le {start_time_paris.strftime('%d/%m/%Y')} à {start_time_paris.strftime('%Hh%M')}", inline=False)
             embed.add_field(name="DÉBUT DANS", value=format_time_left(event['start_time']), inline=False)
         else:
             embed.add_field(name="TEMPS RESTANT", value=format_time_left(event['end_time']), inline=False)
@@ -303,7 +307,11 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     embed = discord.Embed(title=f"NEW EVENT: {event_name}", description="Rejoignez-nous pour un événement spécial !", color=NEON_PURPLE)
     embed.add_field(name="POINT DE RALLIEMENT", value=waiting_channel.mention, inline=True)
     embed.add_field(name="RÔLE ATTRIBUÉ", value=role.mention, inline=True)
-    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=False)
+    
+    start_time_paris_str = start_time_paris.strftime('%Hh%M le %d/%m')
+    embed.add_field(name="DÉBUT PRÉVU", value=start_time_paris_str, inline=True)
+    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=True)
+
     embed.add_field(name=f"PARTICIPANTS (0/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     embed.set_footer(text="Style 8-bit futuriste, néon")
     embed.set_image(url="https://i.imgur.com/uCgE04g.gif")
@@ -367,7 +375,11 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
     embed = discord.Embed(title=f"NEW EVENT: {event_name}", description="Rejoignez-nous pour un événement spécial !", color=NEON_PURPLE)
     embed.add_field(name="POINT DE RALLIEMENT", value=waiting_channel.mention, inline=True)
     embed.add_field(name="RÔLE ATTRIBUÉ", value=role.mention, inline=True)
-    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=False)
+
+    start_time_paris_str = start_time_localized.strftime('%Hh%M le %d/%m/%Y')
+    embed.add_field(name="DÉBUT PRÉVU", value=start_time_paris_str, inline=True)
+    embed.add_field(name="DÉBUT DANS", value=format_time_left(event_data['start_time']), inline=True)
+    
     embed.add_field(name=f"PARTICIPANTS (0/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     embed.set_footer(text="Style 8-bit futuriste, néon")
     embed.set_image(url="https://i.imgur.com/uCgE04g.gif")
