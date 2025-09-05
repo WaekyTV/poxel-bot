@@ -79,7 +79,7 @@ def format_time_left(end_time_str):
     if seconds > 0: parts.append(f"{seconds} seconde(s)")
     return ", ".join(parts) or "Moins d'une seconde"
 
-async def update_event_embed(bot, event_name):
+async def update_event_embed(bot, event_name, interaction=None):
     """
     Met à jour l'embed de l'événement avec les informations actuelles.
     """
@@ -119,6 +119,20 @@ async def update_event_embed(bot, event_name):
         # Mise à jour des boutons dans la vue
         view = EventButtonsView(bot, event_name, event)
         await message.edit(embed=embed, view=view)
+
+        # Envoi des notifications de clôture/réouverture si l'interaction est un changement de participant
+        if interaction:
+            old_participant_count = event.get('last_participant_count', 0)
+            new_participant_count = len(event['participants'])
+            max_participants = event.get('max_participants', 0)
+
+            if old_participant_count < max_participants and new_participant_count == max_participants:
+                await channel.send(f"@everyone ⛔ **INSCRIPTIONS CLOSES !** L'événement **{event_name}** a atteint son nombre maximum de participants.")
+            elif old_participant_count == max_participants and new_participant_count < max_participants:
+                await channel.send(f"@everyone ✅ **RÉOUVERTURE !** Une place est disponible pour l'événement **{event_name}**.")
+
+            event['last_participant_count'] = new_participant_count
+            save_data(db)
     
     except discord.NotFound:
         if event_name in db['events']:
@@ -170,6 +184,8 @@ class EventButtonsView(View):
     async def on_quit_click(self, interaction: discord.Interaction):
         """Gère la désinscription d'un utilisateur."""
         user_id = interaction.user.id
+        initial_participant_count = len(self.event_data['participants'])
+        
         if user_id not in [p['id'] for p in self.event_data['participants']]:
             await interaction.response.send_message("Vous n'êtes pas inscrit à cet événement.", ephemeral=True)
             return
@@ -177,7 +193,7 @@ class EventButtonsView(View):
         self.event_data['participants'] = [p for p in self.event_data['participants'] if p['id'] != user_id]
         save_data(db)
         
-        await update_event_embed(self.bot, self.event_name)
+        await update_event_embed(self.bot, self.event_name, interaction=interaction)
         await interaction.response.send_message("Vous vous êtes désinscrit de l'événement.", ephemeral=True)
 
     async def on_list_click(self, interaction: discord.Interaction):
@@ -222,7 +238,7 @@ class ParticipantModal(Modal, title="Pseudo pour le jeu"):
         })
         save_data(db)
         
-        await update_event_embed(self.view.bot, self.event_name)
+        await update_event_embed(self.view.bot, self.event_name, interaction=interaction)
         await interaction.response.send_message(f"Vous avez été inscrit à l'événement `{self.event_name}` avec le pseudo `{game_pseudo}`.", ephemeral=True)
 
 # --- Initialisation du bot ---
@@ -250,11 +266,10 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         return
 
     try:
-        now = datetime.datetime.now()
+        now_paris = datetime.datetime.now(USER_TIMEZONE)
         start_hour, start_minute = map(int, start_time_str.split('h'))
-        start_time_naive = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-        start_time_localized = USER_TIMEZONE.localize(start_time_naive)
-        start_time_utc = start_time_localized.astimezone(SERVER_TIMEZONE)
+        start_time_paris = now_paris.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        start_time_utc = start_time_paris.astimezone(SERVER_TIMEZONE)
 
         if start_time_utc < datetime.datetime.now(SERVER_TIMEZONE):
             await ctx.send("L'heure de début est déjà passée. Veuillez choisir une heure future.", delete_after=120)
@@ -278,6 +293,7 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         "waiting_channel_id": waiting_channel.id,
         "max_participants": max_participants,
         "participants": [],
+        "last_participant_count": 0,
         "is_started": False,
         "message_id": None,
         "reminded_30m": False,
@@ -341,6 +357,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
         "waiting_channel_id": waiting_channel.id,
         "max_participants": max_participants,
         "participants": [],
+        "last_participant_count": 0,
         "is_started": False,
         "message_id": None,
         "reminded_30m": False,
