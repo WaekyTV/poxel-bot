@@ -30,8 +30,15 @@ def load_data():
     """
     if os.path.exists(DATABASE_FILE):
         with open(DATABASE_FILE, 'r') as f:
-            return json.load(f)
-    return {"events": {}, "contests": {}}
+            data = json.load(f)
+            # S'assurer que les clés existent pour éviter les erreurs
+            data.setdefault("events", {})
+            data.setdefault("contests", {})
+            # Décalage par défaut de 180s (3 minutes)
+            data.setdefault("settings", {"time_offset_seconds": 180})
+            return data
+    # Décalage par défaut de 180s (3 minutes) lors de la création du fichier
+    return {"events": {}, "contests": {}, "settings": {"time_offset_seconds": 180}}
 
 def save_data(data):
     """Sauvegarde les données dans le fichier JSON."""
@@ -53,15 +60,20 @@ def run_flask():
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
 # --- Fonctions utlitaires pour le formatage et la gestion ---
+def get_adjusted_time():
+    """Renvoie l'heure UTC actuelle ajustée avec le décalage."""
+    offset = db['settings'].get('time_offset_seconds', 0)
+    return datetime.datetime.now(SERVER_TIMEZONE) + datetime.timedelta(seconds=offset)
+
 def format_time_left(end_time_str):
     """
     Formate le temps restant en jours, heures, minutes et secondes.
     """
     end_time_utc = datetime.datetime.fromisoformat(end_time_str).replace(tzinfo=SERVER_TIMEZONE)
-    now_utc = datetime.datetime.now(SERVER_TIMEZONE)
+    now_utc = get_adjusted_time()
     delta = end_time_utc - now_utc
     total_seconds = int(delta.total_seconds())
-    
+
     if total_seconds < 0:
         total_seconds = abs(total_seconds)
         minutes, seconds = divmod(total_seconds, 60)
@@ -257,6 +269,70 @@ class ParticipantModal(Modal, title="Vérification de votre pseudo"):
         await update_event_embed(self.view.bot, self.event_name, interaction=interaction)
         await interaction.response.send_message(f"Vous avez été inscrit à l'événement `{self.event_name}` avec le pseudo `{game_pseudo}`.", ephemeral=True)
 
+# --- Classes et fonctions pour les concours ---
+class ConcoursView(View):
+    def __init__(self, concours_name, timeout=None):
+        super().__init__(timeout=timeout)
+        self.concours_name = concours_name
+        
+    @discord.ui.button(label="Participer", style=discord.ButtonStyle.success)
+    async def participate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        concours_data = db.get('contests', {}).get(self.concours_name)
+
+        if not concours_data:
+            await interaction.response.send_message("Ce concours n'existe plus.", ephemeral=True)
+            return
+
+        participants = concours_data.get('participants', [])
+        if user.id in [p for p in participants]:
+            await interaction.response.send_message("Tu participes déjà à ce concours !", ephemeral=True)
+        else:
+            participants.append(user.id)
+            concours_data['participants'] = participants
+            db['contests'][self.concours_name] = concours_data
+            save_data(db)
+            await interaction.response.send_message("Tu as rejoint le concours !", ephemeral=True)
+            
+        await update_concours_embed(interaction.client, self.concours_name)
+
+async def update_concours_embed(bot_instance, concours_name):
+    """Met à jour l'embed du concours en temps réel."""
+    concours_data = db.get('contests', {}).get(concours_name)
+    if not concours_data or concours_data.get('message_id') is None:
+        return
+
+    channel = bot_instance.get_channel(concours_data['channel_id'])
+    if channel:
+        try:
+            message = await channel.fetch_message(concours_data['message_id'])
+            if message:
+                participants_names = []
+                for user_id in concours_data['participants']:
+                    user = bot_instance.get_user(user_id)
+                    if user:
+                        participants_names.append(user.display_name)
+                
+                participants_list = "\n".join(participants_names)
+                if not participants_list:
+                    participants_list = "Aucun participant pour le moment."
+
+                embed = discord.Embed(
+                    title=f"🎉 {concours_data['title']} 🎉",
+                    description=concours_data['description'],
+                    color=NEON_BLUE
+                )
+                embed.add_field(name="Date de fin", value=concours_data['end_date'], inline=False)
+                embed.add_field(name="Participants", value=participants_list, inline=False)
+                embed.set_footer(text="Cliquez sur 'Participer' pour rejoindre le concours.")
+
+                await message.edit(embed=embed)
+        except discord.NotFound:
+            print(f"Le message du concours {concours_name} n'a pas été trouvé. Il sera supprimé de la base de données.")
+            if concours_name in db['contests']:
+                del db['contests'][concours_name]
+                save_data(db)
+
 # --- Initialisation du bot ---
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
@@ -265,10 +341,34 @@ async def on_ready():
     """Événement déclenché quand le bot est prêt."""
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
     print("------")
+    print(f"Heure actuelle du serveur (UTC) : {datetime.datetime.now(SERVER_TIMEZONE)}")
+    print(f"Heure ajustée pour le bot (UTC) : {get_adjusted_time()}")
+    print(f"Décalage actuel : {db['settings'].get('time_offset_seconds', 0)} secondes")
     check_events.start()
-    check_contests.start()
+    check_contests_end.start()
 
 # --- Commandes du bot ---
+@bot.command(name="set_offset")
+@commands.has_permissions(administrator=True)
+async def set_offset(ctx, offset_str: str):
+    """
+    Définit le décalage de temps pour corriger l'horloge du serveur.
+    Syntaxe: !set_offset 180s (pour +3min) ou -180s (pour -3min)
+    """
+    await ctx.message.delete(delay=120)
+    try:
+        value = int(offset_str[:-1])
+        unit = offset_str[-1].lower()
+        if unit != 's':
+            await ctx.send("Le format doit être un nombre suivi de 's' (ex: 180s).", delete_after=120)
+            return
+
+        db['settings']['time_offset_seconds'] = value
+        save_data(db)
+        await ctx.send(f"Le décalage de temps a été ajusté à {value} secondes.", delete_after=120)
+    except (ValueError, IndexError):
+        await ctx.send("Format invalide. Utilisez 'nombre' + 's' (ex: 180s).", delete_after=120)
+
 @bot.command(name="create_event")
 @commands.has_permissions(administrator=True)
 async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, game_participants_str: str, event_name: str):
@@ -357,7 +457,7 @@ async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_st
         start_time_localized = USER_TIMEZONE.localize(start_time_naive)
         start_time_utc = start_time_localized.astimezone(SERVER_TIMEZONE)
 
-        if start_time_utc < datetime.datetime.now(SERVER_TIMEZONE):
+        if start_time_utc < get_adjusted_time():
             await ctx.send("La date et l'heure sont déjà passées. Veuillez choisir une date future.", delete_after=120)
             return
 
@@ -449,9 +549,9 @@ async def end_event(ctx, event_name: str):
     save_data(db)
     await ctx.send(f"L'événement `{event_name}` a été terminé manuellement.", delete_after=120)
 
-@bot.command(name="tirage")
+@bot.command(name="event_tirage")
 @commands.has_permissions(administrator=True)
-async def tirage(ctx, event_name: str):
+async def event_tirage(ctx, event_name: str):
     """Effectue un tirage au sort parmi les participants d'un événement."""
     await ctx.message.delete(delay=120)
     if event_name not in db['events']:
@@ -466,97 +566,105 @@ async def tirage(ctx, event_name: str):
     winner = random.choice(participants)
     await ctx.send(f"🎉 **Félicitations à <@{winner['id']}>** ! 🎉\nVous êtes le grand gagnant du tirage au sort pour l'événement `{event_name}`.")
 
+# --- Commandes du nouveau système de concours ---
 @bot.command(name="concours")
 @commands.has_permissions(administrator=True)
-async def create_contest(ctx, contest_name: str, end_date_str: str):
+async def create_concours(ctx, date_fin: str, titre: str, *, description: str):
     """
     Crée un concours.
-    Syntaxe: !concours "nom_concours" JJ/MM/AAAA
+    Exemple: !concours 31/12/2025 "Titre du concours" "Description du concours"
     """
-    await ctx.message.delete(delay=120)
-    if contest_name in db['contests']:
-        await ctx.send(f"Un concours nommé `{contest_name}` existe déjà.", delete_after=120)
-        return
-    
     try:
-        end_date = datetime.datetime.strptime(end_date_str, '%d/%m/%Y').date()
-        if end_date < datetime.date.today():
-            await ctx.send("La date de fin du concours est déjà passée.", delete_after=120)
-            return
+        fin_date = datetime.datetime.strptime(date_fin, "%d/%m/%Y").date()
     except ValueError:
-        await ctx.send("Format de date invalide. Utilisez le format 'JJ/MM/AAAA'.", delete_after=120)
+        await ctx.send("Le format de la date de fin est incorrect. Utilisez `jj/mm/aaaa`.")
         return
 
-    db['contests'][contest_name] = {
-        "end_date": end_date.isoformat(),
-        "participants": [],
-        "announcement_channel_id": ctx.channel.id
+    concours_name = f"{titre.replace(' ', '_')}_{fin_date.strftime('%Y%m%d')}"
+
+    if concours_name in db.get('contests', {}):
+        await ctx.send("Un concours avec ce titre et cette date existe déjà. Veuillez en choisir un autre.")
+        return
+
+    embed = discord.Embed(
+        title=f"🎉 {titre} 🎉",
+        description=description,
+        color=NEON_BLUE
+    )
+    embed.add_field(name="Date de fin", value=date_fin, inline=False)
+    embed.add_field(name="Participants", value="Aucun participant pour le moment.", inline=False)
+    embed.set_footer(text="Cliquez sur 'Participer' pour rejoindre le concours.")
+
+    view = ConcoursView(concours_name)
+    message = await ctx.send(embed=embed, view=view)
+
+    await ctx.send(f"@everyone Un nouveau concours vient de commencer ! {titre}\nPour participer, cliquez sur le bouton 'Participer' ci-dessous !")
+
+    db['contests'][concours_name] = {
+        "title": titre,
+        "description": description,
+        "end_date": date_fin,
+        "end_timestamp": datetime.datetime.combine(fin_date, datetime.time.max).isoformat(),
+        "channel_id": ctx.channel.id,
+        "message_id": message.id,
+        "participants": []
     }
     save_data(db)
 
-    await ctx.channel.send(f"@everyone 🎮 **NOUVEAU CONCOURS !** 🎮\nParticipez au concours `{contest_name}` ! Fin des inscriptions le {end_date_str}.")
-    await ctx.send(f"Le concours `{contest_name}` a été créé avec succès.", delete_after=120)
+@bot.command(name="tirage")
+@commands.has_permissions(administrator=True)
+async def tirage_au_sort(ctx, concours_name: str):
+    """
+    Tire au sort un participant d'un concours.
+    Exemple: !tirage "Titre_du_concours_jj/mm/aaaa"
+    """
+    concours_data = db.get('contests', {}).get(concours_name)
 
+    if not concours_data:
+        await ctx.send("Ce concours n'existe pas.")
+        return
+
+    participants = concours_data.get('participants', [])
+    if not participants:
+        await ctx.send("Il n'y a aucun participant pour ce concours.")
+        return
+
+    gagnant_id = random.choice(participants)
+    
+    annonce_embed = discord.Embed(
+        title=f"Le tirage au sort de {concours_data['title']} est terminé !",
+        description=f"Le grand gagnant est... **<@{gagnant_id}>** !",
+        color=NEON_PURPLE
+    )
+    annonce_embed.set_image(url="https://i.imgur.com/K1h5nUu.gif") 
+    await ctx.send(f"@everyone Le tirage au sort du concours **{concours_data['title']}** a eu lieu !", embed=annonce_embed)
+
+    try:
+        user = bot.get_user(gagnant_id)
+        if user:
+            await user.send(f"Félicitations **{user.display_name}** ! Tu as remporté le concours **{concours_data['title']}** ! 🎉\nN'hésite pas à contacter les organisateurs pour récupérer ton prix.")
+    except discord.Forbidden:
+        await ctx.send(f"Je n'ai pas pu envoyer de message privé à <@{gagnant_id}>. Assure-toi que tes paramètres de confidentialité le permettent.")
+
+    del db['contests'][concours_name]
+    save_data(db)
+    
 @bot.command(name="end_concours")
 @commands.has_permissions(administrator=True)
-async def end_contest(ctx, contest_name: str):
+async def end_concours(ctx, concours_name: str, *, raison: str):
     """
-    Termine un concours, effectue le tirage au sort et annonce le gagnant.
+    Annule un concours en cours.
+    Exemple: !end_concours "Titre_du_concours_jj/mm/aaaa" "Raison de l'annulation"
     """
-    await ctx.message.delete(delay=120)
-    if contest_name not in db['contests']:
-        await ctx.send(f"Le concours `{contest_name}` n'existe pas.", delete_after=120)
-        return
-        
-    contest_data = db['contests'][contest_name]
-    participants = contest_data['participants']
-    channel = bot.get_channel(contest_data['announcement_channel_id'])
-    
-    if not participants:
-        await ctx.send(f"Il n'y a pas de participants pour le concours `{contest_name}`.", delete_after=120)
+    if concours_name not in db.get('contests', {}):
+        await ctx.send("Ce concours n'existe pas.")
         return
 
-    winner = random.choice(participants)
-    
-    if channel:
-        await channel.send(f"@everyone 🎉 **Félicitations à <@{winner}>** ! 🎉\nVous êtes le grand gagnant du concours `{contest_name}` !")
-    
-    member = ctx.guild.get_member(winner)
-    if member:
-        try:
-            await member.send(f"Félicitations ! Vous avez gagné le concours `{contest_name}`. Contactez l'administration pour réclamer votre prix.")
-        except discord.Forbidden:
-            print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
+    await ctx.send(f"@everyone Le concours **{db['contests'][concours_name]['title']}** a été annulé. Raison : {raison}")
 
-    del db['contests'][contest_name]
+    del db['contests'][concours_name]
     save_data(db)
-    await ctx.send(f"Le concours `{contest_name}` a été terminé et le gagnant a été annoncé.", delete_after=120)
-
-@bot.command(name="helpoxel")
-async def helpoxel(ctx, command_name: str = None):
-    """Affiche une aide détaillée ou la liste des commandes."""
-    await ctx.message.delete(delay=120)
-    if command_name:
-        cmd = bot.get_command(command_name)
-        if cmd:
-            embed = discord.Embed(
-                title=f"Aide pour la commande: !{cmd.name}",
-                description=cmd.help or "Aucune description.",
-                color=NEON_BLUE
-            )
-            embed.add_field(name="Syntaxe", value=f"```\n{cmd.signature}\n```", inline=False)
-            await ctx.send(embed=embed, delete_after=120)
-        else:
-            await ctx.send(f"La commande `{command_name}` n'existe pas.", delete_after=120)
-    else:
-        embed = discord.Embed(
-            title="MANUEL DE POXEL",
-            description="Bienvenue dans le manuel de Poxel. Voici la liste des commandes disponibles :",
-            color=NEON_BLUE
-        )
-        for cmd in bot.commands:
-            embed.add_field(name=f"!{cmd.name}", value=cmd.help or "Pas de description.", inline=False)
-        await ctx.send(embed=embed, delete_after=120)
+    await ctx.send("Le concours a été annulé et supprimé de la base de données.")
 
 # --- Tâches planifiées pour la gestion des événements et des concours ---
 @tasks.loop(seconds=1)
@@ -565,7 +673,7 @@ async def check_events():
     events_to_delete = []
     for event_name, event_data in list(db['events'].items()):
         start_time_utc = datetime.datetime.fromisoformat(event_data['start_time']).replace(tzinfo=SERVER_TIMEZONE)
-        now_utc = datetime.datetime.now(SERVER_TIMEZONE)
+        now_utc = get_adjusted_time()
         
         # Rappel 30 minutes avant le début
         if not event_data.get('reminded_30m') and (start_time_utc - now_utc).total_seconds() <= 30 * 60 and start_time_utc > now_utc:
@@ -647,34 +755,27 @@ async def check_events():
         del db['events'][event_name]
     save_data(db)
 
-@tasks.loop(hours=24)
-async def check_contests():
-    """Vérifie l'état des concours et les termine s'ils sont arrivés à échéance."""
+@tasks.loop(minutes=1)
+async def check_contests_end():
+    """Tâche en arrière-plan pour vérifier la fin des concours."""
+    now_utc = datetime.datetime.utcnow().replace(tzinfo=SERVER_TIMEZONE)
     contests_to_delete = []
-    now_date = datetime.date.today()
-    for contest_name, contest_data in list(db['contests'].items()):
-        end_date = datetime.date.fromisoformat(contest_data['end_date'])
-        if now_date >= end_date:
-            channel = bot.get_channel(contest_data['announcement_channel_id'])
-            participants = contest_data['participants']
-            
-            if participants:
-                winner = random.choice(participants)
-                if channel: await channel.send(f"@everyone 🎉 **Félicitations à <@{winner}>** ! 🎉\nLe concours `{contest_name}` est terminé et vous êtes le grand gagnant !")
-                member = bot.get_guild(channel.guild.id).get_member(winner)
-                if member:
-                    try:
-                        await member.send(f"Félicitations ! Vous avez gagné le concours `{contest_name}`. Contactez l'administration pour réclamer votre prix.")
-                    except discord.Forbidden:
-                        print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
-            else:
-                if channel: await channel.send(f"Le concours `{contest_name}` est terminé mais n'a pas de participants.")
-            
-            contests_to_delete.append(contest_name)
+    for concours_name, concours_data in list(db.get('contests', {}).items()):
+        try:
+            end_time_utc = datetime.datetime.fromisoformat(concours_data['end_timestamp']).replace(tzinfo=SERVER_TIMEZONE)
+            if now_utc >= end_time_utc:
+                channel = bot.get_channel(concours_data['channel_id'])
+                if channel:
+                    await channel.send(f"@everyone Le concours **{concours_data['title']}** est terminé ! Utilisez `!tirage {concours_name}` pour annoncer le gagnant.")
+                contests_to_delete.append(concours_name)
+        except Exception as e:
+            print(f"Erreur lors de la vérification du concours {concours_name}: {e}")
+            contests_to_delete.append(concours_name)
+    
+    for concours_name in contests_to_delete:
+        db['contests'][concours_name]['status'] = 'ended'
+        save_data(db)
 
-    for contest_name in contests_to_delete:
-        del db['contests'][contest_name]
-    save_data(db)
 
 if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
