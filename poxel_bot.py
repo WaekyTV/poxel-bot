@@ -157,18 +157,18 @@ class EventButtonsView(View):
         self.current_participants = len(self.event_data.get('participants', []))
 
         # Création des boutons
-        start_button = Button(label="START", style=discord.ButtonStyle.success, emoji="✅")
+        start_button = Button(label="PARTICIPER", style=discord.ButtonStyle.success, emoji="✅")
         start_button.callback = self.on_start_click
 
-        quit_button = Button(label="QUIT", style=discord.ButtonStyle.danger, emoji="❌")
+        quit_button = Button(label="ANNULER", style=discord.ButtonStyle.danger, emoji="❌")
         quit_button.callback = self.on_quit_click
 
-        list_button = Button(label="Liste des événements en cours", style=discord.ButtonStyle.secondary)
+        list_button = Button(label="Événements en cours", style=discord.ButtonStyle.secondary)
         list_button.callback = self.on_list_click
 
         # Logique visuelle pour le bouton d'inscription
         if self.current_participants >= self.max_participants:
-            start_button.label = "INSCRIPTION CLOS"
+            start_button.label = "INSCRIPTIONS CLOSES"
             start_button.disabled = True
         
         self.add_item(start_button)
@@ -218,12 +218,12 @@ class EventButtonsView(View):
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-class ParticipantModal(Modal, title="Pseudo pour le jeu"):
+class ParticipantModal(Modal, title="Vérification de votre pseudo"):
     """Fenêtre modale pour que l'utilisateur entre son pseudo de jeu."""
     game_pseudo = TextInput(
-        label="Votre pseudo pour le jeu",
-        placeholder="Entrez votre pseudo ici...",
-        required=True
+        label="Entrez votre pseudo pour le jeu",
+        placeholder="Laissez vide si c'est le même que votre pseudo Discord",
+        required=False
     )
     def __init__(self, view, event_name):
         super().__init__()
@@ -234,6 +234,8 @@ class ParticipantModal(Modal, title="Pseudo pour le jeu"):
         """Ajoute le participant à l'événement et met à jour l'embed."""
         user = interaction.user
         game_pseudo = self.game_pseudo.value
+        if not game_pseudo:
+            game_pseudo = user.display_name
         
         self.view.event_data['participants'].append({
             "id": user.id,
@@ -272,12 +274,13 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     try:
         now_paris = datetime.datetime.now(USER_TIMEZONE)
         start_hour, start_minute = map(int, start_time_str.split('h'))
+        # Création de l'heure exacte sans les secondes ni les microsecondes pour éviter le décalage
         start_time_paris = now_paris.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        # Gestion du passage au jour suivant si l'heure est déjà passée
+        if start_time_paris < now_paris:
+            start_time_paris += datetime.timedelta(days=1)
+        
         start_time_utc = start_time_paris.astimezone(SERVER_TIMEZONE)
-
-        if start_time_utc < datetime.datetime.now(SERVER_TIMEZONE):
-            await ctx.send("L'heure de début est déjà passée. Veuillez choisir une heure future.", delete_after=120)
-            return
 
         duration_value, duration_unit = int(duration_str[:-3]), duration_str[-3:].lower()
         if duration_unit == 'min': duration = datetime.timedelta(minutes=duration_value)
@@ -640,7 +643,7 @@ async def check_contests():
                     try:
                         await member.send(f"Félicitations ! Vous avez gagné le concours `{contest_name}`. Contactez l'administration pour réclamer votre prix.")
                     except discord.Forbidden:
-                        print(f"Impossible d'envoyer un MP au gagnant {member.name}.")
+                        print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
             else:
                 if channel: await channel.send(f"Le concours `{contest_name}` est terminé mais n'a pas de participants.")
             
