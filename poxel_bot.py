@@ -21,7 +21,7 @@ NEON_PURPLE = 0x6441a5
 NEON_BLUE = 0x027afa
 USER_TIMEZONE = pytz.timezone('Europe/Paris')
 SERVER_TIMEZONE = pytz.utc
-DATABASE_FILE = 'events.json'
+DATABASE_FILE = 'events_contests.json'
 
 def load_data():
     """
@@ -52,7 +52,7 @@ def run_flask():
     """Démarre le serveur Flask sur un thread séparé."""
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
 
-# --- Fonctions utlitaires pour le formatage et la gestion ---
+# --- Fonctions utilitaires pour le formatage et la gestion ---
 def get_adjusted_time():
     """Renvoie l'heure UTC actuelle ajustée avec le décalage."""
     offset = db['settings'].get('time_offset_seconds', 0)
@@ -115,7 +115,6 @@ async def update_event_embed(bot, event_name, interaction=None):
         embed.add_field(name="RÔLE ATTRIBUÉ", value=f"<@&{event['role_id']}>", inline=True)
         
         if not event.get('is_started'):
-            # Affichage de l'heure exacte et du compte à rebours
             start_time_utc = datetime.datetime.fromisoformat(event['start_time']).replace(tzinfo=SERVER_TIMEZONE)
             start_time_paris = start_time_utc.astimezone(USER_TIMEZONE)
             embed.add_field(name="DÉBUT PRÉVU", value=f"Le {start_time_paris.strftime('%d/%m/%Y')} à {start_time_paris.strftime('%Hh%M')}", inline=False)
@@ -135,11 +134,9 @@ async def update_event_embed(bot, event_name, interaction=None):
         # C'est ici que vous changez le GIF pour les mises à jour de l'événement
         embed.set_image(url="https://cdn.lospec.com/gallery/loading-727267.gif ") 
         
-        # Mise à jour des boutons dans la vue
         view = EventButtonsView(bot, event_name, event)
         await message.edit(embed=embed, view=view)
 
-        # Envoi des notifications de clôture/réouverture si l'interaction est un changement de participant
         if interaction:
             old_participant_count = event.get('last_participant_count', 0)
             new_participant_count = len(event['participants'])
@@ -160,6 +157,47 @@ async def update_event_embed(bot, event_name, interaction=None):
     except Exception as e:
         print(f"Erreur lors de la mise à jour de l'embed pour {event_name}: {e}")
 
+async def update_contest_embed(bot, contest_name):
+    """Met à jour l'embed du concours."""
+    if contest_name not in db['contests']: return
+    contest = db['contests'][contest_name]
+    announcement_channel_id = contest['announcement_channel_id']
+    message_id = contest['message_id']
+    
+    try:
+        channel = bot.get_channel(announcement_channel_id)
+        if not channel: return
+        message = await channel.fetch_message(message_id)
+
+        # Création de l'embed
+        embed = discord.Embed(
+            title=contest['title'],
+            description=contest['description'],
+            color=NEON_BLUE
+        )
+        
+        end_date_time = datetime.datetime.fromisoformat(contest['end_time']).replace(tzinfo=SERVER_TIMEZONE)
+        end_date_paris = end_date_time.astimezone(USER_TIMEZONE)
+        
+        participants_list = "\n".join([f"- <@{p['id']}>" for p in contest['participants']])
+        if not participants_list: participants_list = "Aucun participant pour le moment."
+        
+        embed.add_field(name="INSCRITS", value=participants_list, inline=False)
+        embed.add_field(name="FIN DU CONCOURS", value=f"Le {end_date_paris.strftime('%d/%m/%Y')} à {end_date_paris.strftime('%H:%M')}", inline=False)
+        embed.add_field(name="TEMPS RESTANT", value=format_time_left(contest['end_time']), inline=False)
+        embed.set_footer(text="Style 8-bit futuriste, néon")
+        embed.set_image(url="https://i.imgur.com/uCgE04g.gif") 
+        
+        view = ContestButtonsView(bot, contest_name, contest)
+        await message.edit(embed=embed, view=view)
+
+    except discord.NotFound:
+        if contest_name in db['contests']:
+            del db['contests'][contest_name]
+            save_data(db)
+    except Exception as e:
+        print(f"Erreur lors de la mise à jour de l'embed du concours {contest_name}: {e}")
+
 # --- Classes de boutons et de vues (UI) ---
 class EventButtonsView(View):
     """Vue pour les boutons d'inscription aux événements."""
@@ -171,7 +209,6 @@ class EventButtonsView(View):
         self.max_participants = self.event_data.get('max_participants', 10)
         self.current_participants = len(self.event_data.get('participants', []))
 
-        # Création des boutons
         start_button = Button(label="START", style=discord.ButtonStyle.success, emoji="✅")
         start_button.callback = self.on_start_click
 
@@ -181,7 +218,6 @@ class EventButtonsView(View):
         list_button = Button(label="Événements en cours", style=discord.ButtonStyle.secondary)
         list_button.callback = self.on_list_click
 
-        # Logique visuelle pour le bouton d'inscription
         if self.current_participants >= self.max_participants:
             start_button.label = "INSCRIPTIONS CLOSES"
             start_button.disabled = True
@@ -232,6 +268,53 @@ class EventButtonsView(View):
                 color=NEON_PURPLE
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class ContestButtonsView(View):
+    """Vue pour les boutons d'inscription aux concours."""
+    def __init__(self, bot, contest_name, contest_data, timeout=None):
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.contest_name = contest_name
+        self.contest_data = contest_data
+        
+        start_button = Button(label="START", style=discord.ButtonStyle.success, emoji="✅")
+        start_button.callback = self.on_start_click
+        
+        quit_button = Button(label="QUIT", style=discord.ButtonStyle.danger, emoji="❌")
+        quit_button.callback = self.on_quit_click
+        
+        self.add_item(start_button)
+        self.add_item(quit_button)
+        
+    async def on_start_click(self, interaction: discord.Interaction):
+        """Gère l'inscription au concours."""
+        user = interaction.user
+        if user.id in [p['id'] for p in self.contest_data['participants']]:
+            await interaction.response.send_message("Vous êtes déjà inscrit à ce concours !", ephemeral=True)
+            return
+            
+        self.contest_data['participants'].append({
+            "id": user.id,
+            "name": user.display_name
+        })
+        save_data(db)
+        
+        await update_contest_embed(self.bot, self.contest_name)
+        await interaction.response.send_message("Vous êtes inscrit au concours !", ephemeral=True)
+
+    async def on_quit_click(self, interaction: discord.Interaction):
+        """Gère la désinscription du concours."""
+        user_id = interaction.user.id
+        
+        if user_id not in [p['id'] for p in self.contest_data['participants']]:
+            await interaction.response.send_message("Vous n'êtes pas inscrit à ce concours.", ephemeral=True)
+            return
+            
+        self.contest_data['participants'] = [p for p in self.contest_data['participants'] if p['id'] != user_id]
+        save_data(db)
+        
+        await update_contest_embed(self.bot, self.contest_name)
+        await interaction.response.send_message("Vous vous êtes désinscrit du concours.", ephemeral=True)
 
 class ParticipantModal(Modal, title="Vérification de votre pseudo"):
     """Fenêtre modale pour que l'utilisateur entre son pseudo de jeu."""
@@ -314,9 +397,7 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     try:
         now_paris = datetime.datetime.now(USER_TIMEZONE)
         start_hour, start_minute = map(int, start_time_str.split('h'))
-        # Création de l'heure exacte sans les secondes ni les microsecondes pour éviter le décalage
         start_time_paris = now_paris.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-        # Gestion du passage au jour suivant si l'heure est déjà passée
         if start_time_paris < now_paris:
             start_time_paris += datetime.timedelta(days=1)
         
@@ -357,7 +438,6 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
 
     embed.add_field(name=f"PARTICIPANTS (0/{max_participants})", value="Aucun participant pour le moment.", inline=False)
     embed.set_footer(text="Style 8-bit futuriste, néon")
-    # C'est ici que vous changez le GIF lors de la création de l'événement
     embed.set_image(url="https://i.imgur.com/uCgE04g.gif")
     
     view = EventButtonsView(bot, event_name, event_data)
@@ -460,7 +540,6 @@ async def end_event(ctx, event_name: str):
     if announcement_channel and event_data['message_id']:
         try:
             message = await announcement_channel.fetch_message(event_data['message_id'])
-            # Fermeture visuelle de l'embed et suppression des boutons
             embed = message.embeds[0]
             embed.title = f"Événement terminé: {event_name}"
             embed.description = "Cet événement est maintenant terminé. Merci à tous les participants !"
@@ -468,9 +547,11 @@ async def end_event(ctx, event_name: str):
             if len(embed.fields) > 1:
                 for _ in range(len(embed.fields) - 1):
                     embed.remove_field(1)
+            # Suppression du GIF et des boutons
+            embed.set_image(url="")
             await message.edit(embed=embed, view=None)
         except discord.NotFound:
-            pass # Le message a déjà été supprimé
+            pass
             
     if announcement_channel:
         await announcement_channel.send(f"@everyone L'événement **{event_name}** est maintenant terminé. Merci à tous les participants !")
@@ -481,57 +562,118 @@ async def end_event(ctx, event_name: str):
 
 @bot.command(name="tirage")
 @commands.has_permissions(administrator=True)
-async def tirage(ctx, event_name: str):
-    """Effectue un tirage au sort parmi les participants d'un événement."""
+async def tirage(ctx, contest_name: str):
+    """
+    Effectue un tirage au sort pour un concours en cours.
+    Syntaxe: !tirage [nom_du_concours]
+    """
     await ctx.message.delete(delay=120)
-    if event_name not in db['events']:
-        await ctx.send(f"L'événement `{event_name}` n'existe pas.", delete_after=120)
+    if contest_name not in db['contests']:
+        await ctx.send(f"Le concours `{contest_name}` n'existe pas ou n'est pas en cours.", delete_after=120)
         return
-        
-    participants = db['events'][event_name]['participants']
+    
+    contest_data = db['contests'][contest_name]
+    participants = contest_data['participants']
+    channel = bot.get_channel(contest_data['announcement_channel_id'])
+
     if not participants:
-        await ctx.send(f"Il n'y a pas de participants pour le tirage au sort de l'événement `{event_name}`.", delete_after=120)
+        await ctx.send(f"Il n'y a pas de participants pour le tirage au sort du concours `{contest_name}`.", delete_after=120)
         return
 
-    winner = random.choice(participants)
-    await ctx.send(f"🎉 **Félicitations à <@{winner['id']}>** ! 🎉\nVous êtes le grand gagnant du tirage au sort pour l'événement `{event_name}`.")
+    winner_data = random.choice(participants)
+    winner_id = winner_data['id']
+    
+    # Annonce publique
+    if channel:
+        await channel.send(f"@everyone 🎉 **Félicitations à <@{winner_id}>** ! 🎉\nVous êtes le grand gagnant du tirage au sort pour le concours **{contest_name}** !")
+    
+    # Envoi d'un message privé au gagnant
+    member = ctx.guild.get_member(winner_id)
+    if member:
+        try:
+            private_message = f"Félicitations, <@{winner_id}> !\n\nVous êtes le grand gagnant du concours **{contest_name}** !\n\nContactez l'administration pour réclamer votre prix."
+            embed_dm = discord.Embed(
+                title="🏆 VOUS AVEZ GAGNÉ UN CONCOURS !",
+                description=private_message,
+                color=NEON_PURPLE
+            )
+            embed_dm.set_footer(text="Message de Poxel Bot")
+            await member.send(embed=embed_dm)
+            print(f"Message privé envoyé au gagnant {member.name}.")
+        except discord.Forbidden:
+            print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
 
 @bot.command(name="concours")
 @commands.has_permissions(administrator=True)
-async def create_contest(ctx, contest_name: str, end_date_str: str):
+async def create_contest(ctx, end_date_str: str, end_time_str: str, title: str, *, description: str):
     """
-    Crée un concours.
-    Syntaxe: !concours "nom_concours" JJ/MM/AAAA
+    Crée un concours avec une date, un titre et une description.
+    Syntaxe: !concours [date_de_fin] [heure_de_fin] "Titre" "Description"
+    Exemple: !concours 31/12/2025 23h59 "Concours de Dessin" "Dessinez votre personnage préféré !"
     """
     await ctx.message.delete(delay=120)
+    
+    # Vérification des paramètres
+    if not (end_date_str and end_time_str and title and description):
+        await ctx.send("Syntaxe invalide. Utilisez: `!concours [date] [heure] \"Titre\" \"Description\"`", delete_after=120)
+        return
+        
+    contest_name = title.strip()
     if contest_name in db['contests']:
-        await ctx.send(f"Un concours nommé `{contest_name}` existe déjà.", delete_after=120)
+        await ctx.send(f"Un concours nommé `{contest_name}` existe déjà. Veuillez utiliser un titre unique.", delete_after=120)
         return
     
     try:
-        end_date = datetime.datetime.strptime(end_date_str, '%d/%m/%Y').date()
-        if end_date < datetime.date.today():
-            await ctx.send("La date de fin du concours est déjà passée.", delete_after=120)
+        # Création de la date de fin
+        day, month, year = map(int, end_date_str.split('/'))
+        hour, minute = map(int, end_time_str.split('h'))
+        end_time_naive = datetime.datetime(year, month, day, hour, minute)
+        end_time_localized = USER_TIMEZONE.localize(end_time_naive)
+        end_time_utc = end_time_localized.astimezone(SERVER_TIMEZONE)
+
+        if end_time_utc < get_adjusted_time():
+            await ctx.send("La date et l'heure de fin du concours sont déjà passées.", delete_after=120)
             return
-    except ValueError:
-        await ctx.send("Format de date invalide. Utilisez le format 'JJ/MM/AAAA'.", delete_after=120)
+            
+    except (ValueError, IndexError):
+        await ctx.send("Format de date ou d'heure invalide. Utilisez 'JJ/MM/AAAA' et 'HHhMM'.", delete_after=120)
         return
 
-    db['contests'][contest_name] = {
-        "end_date": end_date.isoformat(),
+    contest_data = {
+        "title": title,
+        "description": description,
+        "end_time": end_time_utc.isoformat(),
         "participants": [],
-        "announcement_channel_id": ctx.channel.id
+        "announcement_channel_id": ctx.channel.id,
+        "message_id": None
     }
+    
+    # Création de l'embed du concours
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=NEON_BLUE
+    )
+    embed.add_field(name="FIN DU CONCOURS", value=f"Le {end_time_localized.strftime('%d/%m/%Y')} à {end_time_localized.strftime('%H:%M')}", inline=False)
+    embed.add_field(name="TEMPS RESTANT", value=format_time_left(contest_data['end_time']), inline=False)
+    embed.add_field(name="INSCRITS", value="Aucun participant pour le moment.", inline=False)
+    embed.set_footer(text="Style 8-bit futuriste, néon")
+    embed.set_image(url="https://i.imgur.com/uCgE04g.gif") 
+    
+    view = ContestButtonsView(bot, contest_name, contest_data)
+    message = await ctx.channel.send(content="@everyone 🏆 **NOUVEAU CONCOURS !**", embed=embed, view=view)
+    
+    contest_data['message_id'] = message.id
+    db['contests'][contest_name] = contest_data
     save_data(db)
-
-    await ctx.channel.send(f"@everyone 🎮 **NOUVEAU CONCOURS !** 🎮\nParticipez au concours `{contest_name}` ! Fin des inscriptions le {end_date_str}.")
-    await ctx.send(f"Le concours `{contest_name}` a été créé avec succès.", delete_after=120)
+    await ctx.send(f"Le concours `{contest_name}` a été créé avec succès !", delete_after=120)
 
 @bot.command(name="end_concours")
 @commands.has_permissions(administrator=True)
-async def end_contest(ctx, contest_name: str):
+async def end_contest_manual(ctx, contest_name: str, *, reason: str = None):
     """
-    Termine un concours, effectue le tirage au sort et annonce le gagnant.
+    Annule un concours.
+    Syntaxe: !end_concours "nom_du_concours" "Raison de l'annulation"
     """
     await ctx.message.delete(delay=120)
     if contest_name not in db['contests']:
@@ -539,28 +681,31 @@ async def end_contest(ctx, contest_name: str):
         return
         
     contest_data = db['contests'][contest_name]
-    participants = contest_data['participants']
-    channel = bot.get_channel(contest_data['announcement_channel_id'])
+    announcement_channel = bot.get_channel(contest_data['announcement_channel_id'])
     
-    if not participants:
-        await ctx.send(f"Il n'y a pas de participants pour le concours `{contest_name}`.", delete_after=120)
-        return
-
-    winner = random.choice(participants)
-    
-    if channel:
-        await channel.send(f"@everyone 🎉 **Félicitations à <@{winner}>** ! 🎉\nVous êtes le grand gagnant du concours `{contest_name}` !")
-    
-    member = ctx.guild.get_member(winner)
-    if member:
+    # Mise à jour de l'embed
+    if announcement_channel and contest_data['message_id']:
         try:
-            await member.send(f"Félicitations ! Vous avez gagné le concours `{contest_name}`. Contactez l'administration pour réclamer votre prix.")
-        except discord.Forbidden:
-            print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
-
+            message = await announcement_channel.fetch_message(contest_data['message_id'])
+            embed = message.embeds[0]
+            embed.title = f"Concours annulé: {contest_name}"
+            embed.description = "Ce concours est maintenant annulé."
+            if reason:
+                embed.description += f"\n**Raison:** {reason}"
+            embed.clear_fields()
+            embed.add_field(name="ÉTAT", value="ANNULÉ", inline=False)
+            # Suppression du GIF et des boutons
+            embed.set_image(url="")
+            await message.edit(embed=embed, view=None)
+        except discord.NotFound:
+            pass
+    
+    if announcement_channel:
+        await announcement_channel.send(f"@everyone ❌ Le concours **{contest_name}** a été annulé.")
+    
     del db['contests'][contest_name]
     save_data(db)
-    await ctx.send(f"Le concours `{contest_name}` a été terminé et le gagnant a été annoncé.", delete_after=120)
+    await ctx.send(f"Le concours `{contest_name}` a été annulé manuellement.", delete_after=120)
 
 @bot.command(name="helpoxel")
 async def helpoxel(ctx, command_name: str = None):
@@ -589,7 +734,7 @@ async def helpoxel(ctx, command_name: str = None):
         await ctx.send(embed=embed, delete_after=120)
 
 # --- Tâches planifiées pour la gestion des événements et des concours ---
-@tasks.loop(seconds=1)
+@tasks.loop(seconds=10)
 async def check_events():
     """Vérifie l'état de tous les événements en temps réel."""
     events_to_delete = []
@@ -608,7 +753,7 @@ async def check_events():
         # Logique de démarrage de l'événement
         if not event_data.get('is_started') and now_utc >= start_time_utc:
             channel = bot.get_channel(event_data['announcement_channel_id'])
-            if len(event_data['participants']) < 1: # Minimum de participants
+            if len(event_data['participants']) < 1:
                 if channel:
                     await channel.send(f"@everyone ❌ **ANNULATION:** L'événement **{event_name}** a été annulé car le nombre de participants minimum n'a pas été atteint.")
                     try:
@@ -618,17 +763,16 @@ async def check_events():
                         embed.description = "Cet événement a été annulé car le nombre de participants minimum n'a pas été atteint."
                         embed.clear_fields()
                         embed.add_field(name="ÉTAT", value="ANNULÉ", inline=False)
-                        embed.set_image(url="https://i.imgur.com/uCgE04g.gif") # Optionnel : vous pouvez ajouter une image d'annulation si vous voulez
+                        embed.set_image(url="")
                         await message.edit(embed=embed, view=None)
                     except discord.NotFound:
-                        pass # Le message a déjà été supprimé
+                        pass
                 events_to_delete.append(event_name)
                 continue
                 
             event_data['is_started'] = True
             save_data(db)
             
-            # Fermeture visuelle de l'embed et suppression des boutons
             try:
                 message = await channel.fetch_message(event_data['message_id'])
                 embed = message.embeds[0]
@@ -636,6 +780,7 @@ async def check_events():
                 embed.description = "Cet événement a officiellement commencé. Rendez-vous dans le salon de jeu !"
                 embed.clear_fields()
                 embed.add_field(name="ÉTAT", value="EN COURS", inline=False)
+                embed.set_image(url="")
                 await message.edit(embed=embed, view=None)
             except discord.NotFound:
                 pass
@@ -652,7 +797,6 @@ async def check_events():
                         
             if channel: await channel.send(f"@everyone L'événement **{event_name}** a officiellement commencé ! Les inscriptions sont closes et le rôle a été attribué aux participants.")
 
-        # Logique de fin de l'événement
         end_time_utc = datetime.datetime.fromisoformat(event_data['end_time']).replace(tzinfo=SERVER_TIMEZONE)
         if now_utc >= end_time_utc and event_data.get('is_started'):
             channel = bot.get_channel(event_data['announcement_channel_id'])
@@ -669,42 +813,72 @@ async def check_events():
                         
             events_to_delete.append(event_name)
         
-        # Mise à jour de l'embed pour le temps restant et les participants
-        if not event_data.get('is_started'):
+        if not event_data.get('is_started') and event_data['message_id']:
             await update_event_embed(bot, event_name)
 
     for event_name in events_to_delete:
         del db['events'][event_name]
     save_data(db)
 
-@tasks.loop(hours=24)
+@tasks.loop(seconds=10)
 async def check_contests():
     """Vérifie l'état des concours et les termine s'ils sont arrivés à échéance."""
     contests_to_delete = []
-    now_date = datetime.date.today()
+    now_utc = get_adjusted_time()
     for contest_name, contest_data in list(db['contests'].items()):
-        end_date = datetime.date.fromisoformat(contest_data['end_date'])
-        if now_date >= end_date:
+        end_time_utc = datetime.datetime.fromisoformat(contest_data['end_time']).replace(tzinfo=SERVER_TIMEZONE)
+
+        # Mise à jour de l'embed
+        if contest_data['message_id']:
+            await update_contest_embed(bot, contest_name)
+
+        if now_utc >= end_time_utc:
             channel = bot.get_channel(contest_data['announcement_channel_id'])
+            message_id = contest_data['message_id']
             participants = contest_data['participants']
-            
+
+            # Mise à jour de l'embed pour indiquer la fin du concours
+            if channel and message_id:
+                try:
+                    message = await channel.fetch_message(message_id)
+                    embed = message.embeds[0]
+                    embed.title = f"Concours terminé: {contest_name}"
+                    embed.description = "Ce concours est maintenant terminé !"
+                    embed.clear_fields()
+                    embed.add_field(name="ÉTAT", value="TERMINÉ", inline=False)
+                    embed.set_image(url="")
+                    await message.edit(embed=embed, view=None)
+                except discord.NotFound:
+                    pass
+
             if participants:
-                winner = random.choice(participants)
-                if channel: await channel.send(f"@everyone 🎉 **Félicitations à <@{winner}>** ! 🎉\nLe concours `{contest_name}` est terminé et vous êtes le grand gagnant !")
-                member = bot.get_guild(channel.guild.id).get_member(winner)
+                winner_data = random.choice(participants)
+                winner_id = winner_data['id']
+                if channel:
+                    await channel.send(f"@everyone 🎉 **Félicitations à <@{winner_id}>** ! 🎉\nLe concours **{contest_name}** est terminé et vous êtes le grand gagnant !")
+                member = bot.get_guild(channel.guild.id).get_member(winner_id)
                 if member:
                     try:
-                        await member.send(f"Félicitations ! Vous avez gagné le concours `{contest_name}`. Contactez l'administration pour réclamer votre prix.")
+                        private_message = f"Félicitations, <@{winner_id}> !\n\nVous êtes le grand gagnant du concours **{contest_name}** !\n\nContactez l'administration pour réclamer votre prix."
+                        embed_dm = discord.Embed(
+                            title="🏆 VOUS AVEZ GAGNÉ UN CONCOURS !",
+                            description=private_message,
+                            color=NEON_PURPLE
+                        )
+                        embed_dm.set_footer(text="Message de Poxel Bot")
+                        await member.send(embed=embed_dm)
                     except discord.Forbidden:
                         print(f"Impossible d'envoyer un message privé au gagnant {member.name}.")
             else:
-                if channel: await channel.send(f"Le concours `{contest_name}` est terminé mais n'a pas de participants.")
+                if channel:
+                    await channel.send(f"Le concours `{contest_name}` est terminé mais n'a pas de participants.")
             
             contests_to_delete.append(contest_name)
 
     for contest_name in contests_to_delete:
         del db['contests'][contest_name]
     save_data(db)
+
 
 if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
