@@ -192,7 +192,7 @@ async def update_contest_embed(bot, contest_name):
             del db['contests'][contest_name]
             save_data(db)
     except Exception as e:
-        print(f"Erreur lors de la mise à jour de l'embed du concours {contest_name}: {e}")
+        print(f"Erreur lors de la mise à jour de l'embed du {contest_name}: {e}")
 
 # --- Classes de boutons et de vues (UI) ---
 class EventButtonsView(View):
@@ -282,7 +282,7 @@ class ContestButtonsView(View):
         """Gère l'inscription au concours."""
         user = interaction.user
         if user.id in [p['id'] for p in self.contest_data['participants']]:
-            await interaction.response.send_message("Vous êtes déjà inscrit à ce concours !", ephemeral=True)
+            await interaction.response.send_message("Vous êtes déjà inscrit à ce !", ephemeral=True)
             return
             
         self.contest_data['participants'].append({
@@ -292,7 +292,7 @@ class ContestButtonsView(View):
         save_data(db)
         
         await update_contest_embed(self.bot, self.contest_name)
-        await interaction.response.send_message("Vous êtes inscrit au concours !", ephemeral=True)
+        await interaction.response.send_message("Vous êtes inscrit au !", ephemeral=True)
 
 class ParticipantModal(Modal, title="Vérification de votre pseudo"):
     """Fenêtre modale pour que l'utilisateur entre son pseudo de jeu."""
@@ -546,7 +546,7 @@ async def tirage(ctx, contest_name: str):
     await ctx.message.delete(delay=120)
     
     if contest_name not in db['contests']:
-        await ctx.send(f"Le concours `{contest_name}` n'existe pas. Assurez-vous d'utiliser le nom exact du concours.", delete_after=120)
+        await ctx.send(f"Le `{contest_name}` n'existe pas. Assurez-vous d'utiliser le nom exact du concours.", delete_after=120)
         return
     
     contest_data = db['contests'][contest_name]
@@ -578,7 +578,7 @@ async def tirage(ctx, contest_name: str):
     if winner_member:
         try:
             embed_dm = discord.Embed(
-                title="VOUS AVEZ GAGNÉ UN CONCOURS !",
+                title="🏆VOUS AVEZ GAGNÉ UN CONCOURS !",
                 description=f"Félicitations, <@{winner_id}> !\n\nVous êtes le grand gagnant du concours **{contest_name}** !\n\nContactez l'administration pour réclamer votre prix.",
                 color=NEON_BLUE
             )
@@ -844,7 +844,7 @@ async def check_contests():
                     # Suppression des boutons
                     await message.edit(embed=embed, view=None)
                     
-                    await channel.send(f"@everyone Le concours **{contest_name}** est maintenant terminé. Vous pouvez utiliser la commande `!tirage {contest_name}` pour désigner le gagnant.")
+                    await channel.send(f"@everyone Le concours **{contest_name}** est maintenant terminé. Un gagnant va maintenant être désigné.")
                 except discord.NotFound:
                     pass
             
@@ -855,3 +855,4 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
