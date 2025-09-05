@@ -603,9 +603,6 @@ async def create_contest(ctx, end_date_str: str, end_time_str: str, title: str, 
         return
         
     contest_name = title.strip()
-    if contest_name in db['contests']:
-        await ctx.send(f"Un concours nommé `{contest_name}` existe déjà. Veuillez utiliser un titre unique.", delete_after=120)
-        return
     
     try:
         # Création de la date de fin
@@ -855,4 +852,5 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
 
