@@ -276,7 +276,10 @@ async def update_event_embed(bot, event_name):
         embed.set_footer(text="Style 8-bit futuriste, néon")
         embed.set_image(url="https://i.imgur.com/uCgE04g.gif") 
         
-        await message.edit(embed=embed, view=EventButtonsView(bot, event_name, event))
+        if event.get('is_started'):
+             await message.edit(embed=embed, view=None) # Supprime les boutons
+        else:
+            await message.edit(embed=embed, view=EventButtonsView(bot, event_name, event))
         
     except discord.NotFound:
         del db['events'][event_name]
@@ -300,10 +303,10 @@ async def on_ready():
 # --- GESTION DES COMMANDES ---
 
 @bot.command(name="create_event")
-async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, game_participants_str: str, *, event_name: str):
+async def create_event(ctx, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, *, event_name: str):
     """
     Crée un événement pour le jour même.
-    Syntaxe: !create_event 21h30 10min @role #annonce #salle 10 "pseudonyme" "nom_evenement"
+    Syntaxe: !create_event 21h30 10min @role #annonce #salle 10 "nom_événement"
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
@@ -316,12 +319,11 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
         return
 
     try:
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(USER_TIMEZONE)
         start_hour, start_minute = map(int, start_time_str.split('h'))
         start_time_naive = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
         
-        start_time_localized = USER_TIMEZONE.localize(start_time_naive)
-        start_time_utc = start_time_localized.astimezone(SERVER_TIMEZONE)
+        start_time_utc = start_time_naive.astimezone(SERVER_TIMEZONE)
 
         duration_unit = duration_str[-3:].lower()
         duration_value = int(duration_str[:-3])
@@ -332,6 +334,11 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
             duration = datetime.timedelta(hours=duration_value)
         else:
             await ctx.send("Le format de durée doit être 'Xmin' ou 'Xh'.", delete_after=120)
+            await ctx.message.delete(delay=120)
+            return
+
+        if start_time_utc < datetime.datetime.now(SERVER_TIMEZONE):
+            await ctx.send("L'heure de l'événement est déjà passée.", delete_after=120)
             await ctx.message.delete(delay=120)
             return
 
@@ -376,10 +383,10 @@ async def create_event(ctx, start_time_str: str, duration_str: str, role: discor
     await ctx.message.delete(delay=120)
 
 @bot.command(name="create_event_plan")
-async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, game_participants_str: str, *, event_name: str):
+async def create_event_plan(ctx, date_str: str, start_time_str: str, duration_str: str, role: discord.Role, announcement_channel: discord.TextChannel, waiting_channel: discord.TextChannel, max_participants: int, *, event_name: str):
     """
     Crée un événement planifié pour une date future.
-    Syntaxe: !create_event_plan JJ/MM/AAAA 21h30 10min @role #annonce #salle 10 "pseudonyme" "nom_evenement"
+    Syntaxe: !create_event_plan JJ/MM/AAAA 21h30 10min @role #annonce #salle 10 "nom_événement"
     """
     if not ctx.message.author.guild_permissions.administrator:
         await ctx.send("Désolé, waeky, vous n'avez pas les droits nécessaires pour utiliser cette commande.", delete_after=120)
@@ -698,8 +705,9 @@ async def check_events():
             
             channel = bot.get_channel(event_data['announcement_channel_id'])
             try:
+                # Met à jour l'embed pour supprimer les boutons
                 message = await channel.fetch_message(event_data['message_id'])
-                await message.delete()
+                await message.edit(view=None)
             except discord.NotFound:
                 pass 
             
@@ -737,6 +745,7 @@ async def check_events():
                     except Exception as e:
                         print(f"Impossible de retirer le rôle du membre {member.id}: {e}")
                         
+            # L'embed de l'événement n'est pas supprimé, il reste mais sans les boutons
             events_to_delete.append(event_name)
         
         if not event_data.get('is_started'):
