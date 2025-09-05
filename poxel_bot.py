@@ -828,7 +828,21 @@ async def check_contests():
         if now_utc >= end_time_utc and not contest_data.get('is_finished'):
             channel = bot.get_channel(contest_data['announcement_channel_id'])
             message_id = contest_data['message_id']
-            
+            if not contest_data['participants']:
+                # Annulation si personne ne s'est inscrit
+                if channel and message_id:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                        embed = message.embeds[0]
+                        embed.title = f"Concours annulé: {contest_name}"
+                        embed.description = "Ce concours a été annulé car personne ne s'y est inscrit."
+                        embed.clear_fields()
+                        embed.add_field(name="ÉTAT", value="ANNULÉ", inline=False)
+                        await message.edit(embed=embed, view=None)
+                        await channel.send(f"@everyone ❌ Le concours **{contest_name}** a été annulé car il n'y a eu aucun participant.")
+                    except discord.NotFound:
+                        pass
+                contests_to_delete.append(cont
             # Mise à jour de l'embed pour indiquer la fin du concours
             if channel and message_id:
                 try:
@@ -852,5 +866,6 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
 
 
