@@ -324,7 +324,7 @@ class ParticipantModal(Modal, title="Vérification de votre pseudo"):
         await interaction.response.send_message(f"Vous avez été inscrit à l'événement `{self.event_name}` avec le pseudo `{game_pseudo}`.", ephemeral=True)
 
 # --- Initialisation du bot ---
-bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
+bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
 
 
 @bot.event
@@ -698,7 +698,7 @@ async def end_contest_manual(ctx, contest_name: str, *, reason: str = None):
     save_data(db)
     await ctx.send(f"Le concours `{contest_name}` a été annulé manuellement.", delete_after=120)
 
-@bot.command(name="helpoxel")
+@bot.command(name="helpoxel", aliases=["help"])
 async def help_command(ctx):
     """Affiche toutes les commandes disponibles."""
     embed = discord.Embed(
@@ -880,6 +880,7 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
 
 
 
