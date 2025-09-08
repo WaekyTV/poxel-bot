@@ -701,10 +701,12 @@ async def end_contest_manual(ctx, contest_name: str, *, reason: str = None):
 @bot.command(name="helpoxel", aliases=["help"])
 async def help_command(ctx):
     """Affiche toutes les commandes disponibles."""
+    await ctx.message.delete()
+    
     embed = discord.Embed(
         title="Guide des commandes Poxel",
         description="Voici la liste des commandes disponibles pour ce serveur. Les commandes avec `(ADMIN)` ne peuvent être utilisées que par les administrateurs.",
-        color=NEON_PURPLE
+        color=0x6441a5 # NEON_PURPLE
     )
 
     # Catégorie des commandes d'événements
@@ -722,7 +724,7 @@ async def help_command(ctx):
 
     # Catégorie des commandes utilitaires
     embed.add_field(name="🛠️ Commandes Utilitaires", value="---", inline=False)
-    embed.add_field(name="`!helpoxel`", value="Affiche ce manuel d'aide.", inline=False)
+    embed.add_field(name="`!helpoxel`", value="Affiche ce manuel d'aide. Alias : `!help`", inline=False)
     embed.add_field(name="`!set_offset` (ADMIN)", value="Définit le décalage de temps.\n`!set_offset 180s` (pour +3min)", inline=False)
 
     await ctx.send(embed=embed, ephemeral=True)
@@ -880,6 +882,7 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
 
 
 
