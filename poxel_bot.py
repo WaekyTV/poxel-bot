@@ -324,7 +324,7 @@ class ParticipantModal(Modal, title="Vérification de votre pseudo"):
         await interaction.response.send_message(f"Vous avez été inscrit à l'événement `{self.event_name}` avec le pseudo `{game_pseudo}`.", ephemeral=True)
 
 # --- Initialisation du bot ---
-bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
+bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
 
 @bot.event
@@ -698,15 +698,13 @@ async def end_contest_manual(ctx, contest_name: str, *, reason: str = None):
     save_data(db)
     await ctx.send(f"Le concours `{contest_name}` a été annulé manuellement.", delete_after=120)
 
-@bot.command(name="helpoxel", aliases=["help"])
+@bot.command(name="helpoxel")
 async def help_command(ctx):
     """Affiche toutes les commandes disponibles."""
-    await ctx.message.delete()
-    
     embed = discord.Embed(
         title="Guide des commandes Poxel",
         description="Voici la liste des commandes disponibles pour ce serveur. Les commandes avec `(ADMIN)` ne peuvent être utilisées que par les administrateurs.",
-        color=0x6441a5 # NEON_PURPLE
+        color=NEON_PURPLE
     )
 
     # Catégorie des commandes d'événements
@@ -724,7 +722,7 @@ async def help_command(ctx):
 
     # Catégorie des commandes utilitaires
     embed.add_field(name="🛠️ Commandes Utilitaires", value="---", inline=False)
-    embed.add_field(name="`!helpoxel`", value="Affiche ce manuel d'aide. Alias : `!help`", inline=False)
+    embed.add_field(name="`!helpoxel`", value="Affiche ce manuel d'aide.", inline=False)
     embed.add_field(name="`!set_offset` (ADMIN)", value="Définit le décalage de temps.\n`!set_offset 180s` (pour +3min)", inline=False)
 
     await ctx.send(embed=embed, ephemeral=True)
@@ -882,13 +880,3 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
-
-
-
-
-
-
-
-
-
-
