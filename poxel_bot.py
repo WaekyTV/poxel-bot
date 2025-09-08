@@ -326,6 +326,18 @@ class ParticipantModal(Modal, title="Vérification de votre pseudo"):
 # --- Initialisation du bot ---
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
+
+@bot.event
+async def on_command(ctx):
+    """Supprime le message de commande après son exécution."""
+    if ctx.guild: # Vérifie que la commande n'est pas en message privé
+        try:
+            await ctx.message.delete()
+        except discord.Forbidden:
+            print("Le bot n'a pas la permission de supprimer des messages.")
+        except discord.NotFound:
+            pass # Le message a déjà été supprimé
+
 @bot.event
 async def on_ready():
     """Événement déclenché quand le bot est prêt."""
@@ -868,6 +880,7 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
 
 
 
