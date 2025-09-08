@@ -686,35 +686,31 @@ async def end_contest_manual(ctx, contest_name: str, *, reason: str = None):
     save_data(db)
     await ctx.send(f"Le concours `{contest_name}` a été annulé manuellement.", delete_after=120)
 
-@bot.command(name="helpoxel", aliases=["help"])
-async def help_command(ctx):
-    """Affiche toutes les commandes disponibles."""
-    embed = discord.Embed(
-        title="Guide des commandes Poxel",
-        description="Voici la liste des commandes disponibles pour ce serveur. Les commandes avec `(ADMIN)` ne peuvent être utilisées que par les administrateurs.",
-        color=NEON_PURPLE
-    )
-
-    # Catégorie des commandes d'événements
-    embed.add_field(name="🎉 Commandes d'Événements (ADMIN)", value="---", inline=False)
-    embed.add_field(name="`!create_event`", value="Crée un événement le jour même.\n`!create_event [heure] [durée] @role #annonce #salle [nombre] \"pseudo\" \"nom_evenement\"`", inline=False)
-    embed.add_field(name="`!create_event_plan`", value="Crée un événement planifié.\n`!create_event_plan [date] [heure] [durée] @role #annonce #salle [nombre] \"pseudo\" \"nom_evenement\"`", inline=False)
-    embed.add_field(name="`!listevents`", value="Affiche la liste de tous les événements actifs.", inline=False)
-    embed.add_field(name="`!end_event`", value="Termine un événement manuellement.", inline=False)
-    
-    # Catégorie des commandes de concours
-    embed.add_field(name="🏆 Commandes de Concours", value="---", inline=False)
-    embed.add_field(name="`!concours` (ADMIN)", value="Crée un concours.\n`!concours [date] [heure] \"Titre\" \"Description\"`", inline=False)
-    embed.add_field(name="`!end_concours` (ADMIN)", value="Annule un concours.\n`!end_concours \"Nom_du_concours\" \"Raison\"`", inline=False)
-    embed.add_field(name="`!tirage` (ADMIN)", value="Effectue un tirage au sort.\n`!tirage \"Nom_du_concours\"`", inline=False)
-
-    # Catégorie des commandes utilitaires
-    embed.add_field(name="🛠️ Commandes Utilitaires", value="---", inline=False)
-    embed.add_field(name="`!helpoxel`", value="Affiche ce manuel d'aide. Alias : `!help`", inline=False)
-    embed.add_field(name="`!set_offset` (ADMIN)", value="Définit le décalage de temps.\n`!set_offset 180s` (pour +3min)", inline=False)
-
-    await ctx.send(embed=embed, ephemeral=True)
-
+@bot.command(name="helpoxel")
+async def helpoxel(ctx, command_name: str = None):
+    """Affiche une aide détaillée ou la liste des commandes."""
+    await ctx.message.delete(delay=120)
+    if command_name:
+        cmd = bot.get_command(command_name)
+        if cmd:
+            embed = discord.Embed(
+                title=f"Aide pour la commande: !{cmd.name}",
+                description=cmd.help or "Aucune description.",
+                color=NEON_BLUE
+            )
+            embed.add_field(name="Syntaxe", value=f"```\n{cmd.signature}\n```", inline=False)
+            await ctx.send(embed=embed, delete_after=120)
+        else:
+            await ctx.send(f"La commande `{command_name}` n'existe pas.", delete_after=120)
+    else:
+        embed = discord.Embed(
+            title="MANUEL DE POXEL",
+            description="Bienvenue dans le manuel de Poxel. Voici la liste des commandes disponibles :",
+            color=NEON_BLUE
+        )
+        for cmd in bot.commands:
+            embed.add_field(name=f"!{cmd.name}", value=cmd.help or "Pas de description.", inline=False)
+        await ctx.send(embed=embed, delete_after=120)
 # --- Tâches planifiées pour la gestion des événements et des concours ---
 @tasks.loop(seconds=10)
 async def check_events():
@@ -869,6 +865,7 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
     bot.run(os.environ.get('DISCORD_BOT_TOKEN'))
+
 
 
 
