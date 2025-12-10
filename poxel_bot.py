@@ -2650,8 +2650,8 @@ MOD_BUTTONS_DEFAULTS = {
     "mod_infs": {"label": "Infractions", "emoji": "📋", "style": discord.ButtonStyle.secondary, "row": 2},
     "mod_clear_all": {"label": "Reset Dossier", "emoji": "♻️", "style": discord.ButtonStyle.secondary, "row": 2},
     "mod_slowmode": {"label": "Slowmode", "emoji": "🐌", "style": discord.ButtonStyle.secondary, "row": 2},
-    "mod_config": {"label": "Config Générale", "emoji": "⚙️", "style": discord.ButtonStyle.secondary, "row": 3},
-    "mod_help": {"label": "Aide Commandes", "emoji": "📚", "style": discord.ButtonStyle.secondary, "row": 3}
+    "mod_config": {"label": "Config Générale", "emoji": "⚙️", "style": discord.ButtonStyle.secondary, "row": 3}
+    # mod_help RETIRÉ ICI
 }
 
 CONFIG_BUTTONS_DEFAULTS = {
@@ -2891,9 +2891,7 @@ class ModerationPanelView(View):
     async def open_config(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("Panneau Config :", view=MainConfigView(client), ephemeral=True)
 
-    @discord.ui.button(custom_id="mod_help", row=3)
-    async def help_btn(self, interaction: discord.Interaction, button: Button):
-        await send_admin_help_logic(interaction)
+    # --- BOUTON AIDE RETIRÉ ---
 
 
 class ConfigPanelView(View):
@@ -3011,6 +3009,22 @@ class PlayerPanelView(View):
             if not embed: embed = discord.Embed(title="Contrôle Vocal", color=NEON_BLUE)
             
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# --- NOUVEAU: VUE PANEL AIDE ADMIN PERMANENT ---
+class AdminHelpPanelView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Afficher l'Aide Administrateur", style=discord.ButtonStyle.primary, emoji="📚", custom_id="admin_help_open")
+    async def open_help(self, interaction: discord.Interaction, button: Button):
+        # Cette fonction doit être importée ou définie dans le contexte (sera dans Partie 6)
+        # Comme nous séparons les fichiers, nous ne pouvons pas importer directement 'send_admin_help_logic' ici si elle est dans Partie 6
+        # Solution: Nous allons définir une logique simple ici qui renvoie vers Partie 6 via l'interaction, ou dupliquer la logique d'appel.
+        # Pour rester propre, nous supposons que tout est dans un fichier final 'app.py'.
+        # Si c'est séparé, il faudra veiller à l'ordre des définitions.
+        # Ici, nous utilisons la fonction globale qui sera disponible au runtime.
+        await send_admin_help_logic(interaction)
 
 
 # --- CONFIGURATION DES PANELS ---
@@ -3131,6 +3145,13 @@ async def setup_player_panel(interaction: discord.Interaction):
     if not embed: embed = discord.Embed(title="🎮 Espace Joueurs", description="Vos outils personnels.", color=NEON_GREEN)
     await interaction.channel.send(embed=embed, view=PlayerPanelView())
     await interaction.followup.send("✅ Panel Joueurs posté !", ephemeral=True)
+
+@panel_group.command(name="admin_help", description="Poste le panel d'aide pour les administrateurs.")
+async def setup_admin_help_panel(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    embed = discord.Embed(title="📚 Aide Administrateur", description="Cliquez ci-dessous pour ouvrir le guide des commandes.", color=NEON_PURPLE)
+    await interaction.channel.send(embed=embed, view=AdminHelpPanelView())
+    await interaction.followup.send("✅ Panel Aide Admin posté !", ephemeral=True)
 
 @panel_group.command(name="design", description="Changer l'apparence des embeds des panels (JSON).")
 @app_commands.describe(panel_type="Quel panel modifier ?", json_data="Le code JSON de l'embed")
@@ -3499,6 +3520,7 @@ class PoxelClient(discord.Client):
             self.add_view(ConfigPanelView())
             self.add_view(PlayerPanelView())
             self.add_view(EmbedPanelPermanentView())
+            self.add_view(AdminHelpPanelView()) # AJOUTÉ ICI POUR LA PERSISTANCE
             # On ajoute aussi la vue générique pour qu'elle fonctionne après redémarrage
             # Note: Pour une vraie persistance, il faudrait recréer les vues avec les bons custom_ids
             # Pour l'instant, c'est fonctionnel pour la session courante ou via les commandes setup
