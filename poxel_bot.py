@@ -2863,11 +2863,15 @@ async def freegames_config(interaction: discord.Interaction, salon: discord.Text
     save_data(db)
     await interaction.response.send_message(f"✅ Annonces de jeux gratuits configurées pour {salon.mention}.", ephemeral=True)
 
-@freegames_group.command(name="disable", description="Désactive les annonces de jeux gratuits.")
-async def freegames_disable(interaction: discord.Interaction):
-    db.setdefault("settings", {}).setdefault("free_games_settings", {})["channel_id"] = None
-    save_data(db)
-    await interaction.response.send_message("✅ Annonces de jeux gratuits désactivées.", ephemeral=True)
+@freegames_group.command(name="remove", description="Désactive les annonces de jeux gratuits (Supprime le salon configuré).")
+async def freegames_remove(interaction: discord.Interaction):
+    settings = db.setdefault("settings", {}).setdefault("free_games_settings", {})
+    if settings.get("channel_id"):
+        settings["channel_id"] = None
+        save_data(db)
+        await interaction.response.send_message("✅ Le salon des jeux gratuits a été supprimé. Les annonces sont désactivées.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Aucun salon n'était configuré pour les jeux gratuits.", ephemeral=True)
 
 client.tree.add_command(freegames_group)
 
