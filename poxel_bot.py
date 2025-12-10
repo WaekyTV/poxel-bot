@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Poxel (Fusion Economy & Moderation)
-Description: Bot Discord complet (XP, Eco, Modération, Logs, Tickets, Cinéma, Jeux Gratuits).
-Auteur: Poxel (Refactorisé)
-Version: Unified 1.0
+Poxel
+Description: Un bot Discord complet axé sur l'XP, les classements, les notifications.
+Auteur: Poxel (Développé et mis à jour par Gemini)
+Version: 2.7 (Refactorisé)
 """
 
 # ==================================================================================================
@@ -12,13 +12,14 @@ Version: Unified 1.0
 import subprocess
 import sys
 import importlib
-import os
 
 def check_and_install_packages(packages):
     """
-    Vérifie et installe les paquets requis.
+    Vérifie si les paquets requis sont installés et les installe s'ils ne le sont pas.
+    Amélioré pour re-vérifier l'import après l'installation.
     """
-    optional_packages = ["Pillow", "qrcode[pil]", "requests", "deep_translator", "google-api-python-client"]
+    # Paquets qui peuvent échouer sans être critiques (ex: Pillow pour /rank)
+    optional_packages = ["Pillow", "qrcode[pil]", "requests", "deep_translator"]
     
     for import_name, package_name in packages.items():
         try:
@@ -26,338 +27,357 @@ def check_and_install_packages(packages):
         except ImportError:
             print(f"Module '{import_name}' non trouvé. Installation de '{package_name}'...")
             try:
+                # Tenter l'installation
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+                # Re-tenter l'importation immédiatement après l'installation
                 importlib.import_module(import_name)
-                print(f"'{package_name}' installé avec succès.")
+                print(f"'{package_name}' installé et importé avec succès.")
+                
             except subprocess.CalledProcessError as e:
+                # Erreur durant le pip install
                 print(f"ERREUR: Impossible d'installer {package_name}. Erreur: {e}")
-                if package_name not in optional_packages:
-                    sys.exit(1)
+                if package_name in optional_packages:
+                    print(f"Avertissement : La dépendance optionnelle {package_name} n'a pas pu être installée. Certaines fonctionnalités pourraient être limitées.")
+                else:
+                    print(f"Dépendance critique {package_name} manquante. Arrêt.")
+                    sys.exit(1) # Arrêt si critique
+                    
             except ImportError:
-                print(f"AVERTISSEMENT: '{package_name}' installé mais non importable.")
+                # Erreur d'import MÊME APRÈS l'installation
+                print(f"AVERTISSEMENT: Le paquet '{package_name}' est installé mais ne peut pas être importé.")
+                print(f"Les fonctionnalités associées à '{import_name}' seront désactivées.")
 
-# Liste combinée des paquets requis
+
+# Dictionnaire des paquets requis: {nom d'importation: nom du paquet pip}
 required_packages = {
     "discord": "discord.py",
-    "flask": "Flask",
-    "dotenv": "python-dotenv",
-    "aiohttp": "aiohttp",
     "pytz": "pytz",
-    "PIL": "Pillow",
+    "PIL": "Pillow", # Pour la génération d'images
     "qrcode": "qrcode[pil]",
-    "requests": "requests",
-    "googleapiclient": "google-api-python-client",
-    "deep_translator": "deep-translator"
+    "flask": "Flask", # Pour l'hébergement
+    "dotenv": "python-dotenv",
+    "requests": "requests", # Pour les API
+    "google.api": "google-api-python-client", # Pour l'API YouTube
+    "deep_translator": "deep-translator" # Pour la traduction FR
 }
 check_and_install_packages(required_packages)
 
+
 # ==================================================================================================
-# 1. IMPORTS GLOBAUX (Aucun autre import ne sera fait par la suite)
+# 1. IMPORTS
 # ==================================================================================================
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import tasks
 from discord.ui import Button, View, Modal, TextInput, Select
 import datetime
 import asyncio
+import os
 import json
 import pytz
-import random
-import math
 import re
-import io
+import math
+import random
+import io # Pour manipuler les bytes de l'image
 import logging
+import xml.etree.ElementTree as ET
+from flask import Flask
 from threading import Thread
-import aiohttp
 from typing import Optional, List, Dict, Any, Tuple, Literal
 from dotenv import load_dotenv
-import time
-import textwrap
+import time # Pour la gestion du token Kick
+import textwrap # Pour formater le pendu
 
-# Imports conditionnels
+# Imports pour la génération d'image
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ImageEnhance
+    import requests # Pour télécharger les polices/images
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+    print("AVERTISSEMENT : La librairie Pillow (PIL) n'est pas installée. La carte /rank ne fonctionnera pas.")
 
+# Import pour l'API YouTube (Refonte)
 try:
     from googleapiclient.discovery import build
     YOUTUBE_API_AVAILABLE = True
 except ImportError:
     YOUTUBE_API_AVAILABLE = False
+    print("AVERTISSEMENT : La librairie google-api-python-client n'est pas installée. Les notifs YouTube (API) ne fonctionneront pas.")
 
+# Import pour la traduction
 try:
     from deep_translator import GoogleTranslator
     TRANSLATOR_AVAILABLE = True
 except ImportError:
     TRANSLATOR_AVAILABLE = False
+    print("AVERTISSEMENT : deep-translator non installé. Les descriptions resteront en anglais.")
+
 
 # ==================================================================================================
 # 2. CONFIGURATION & CONSTANTES
 # ==================================================================================================
+
+# Chargement du .env
 load_dotenv()
 
-# Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
-logger = logging.getLogger("Poxel")
-
-# Configuration Discord
+# --- Configuration du Bot Discord ---
 intents = discord.Intents.all()
-client = None  # Sera instancié à la fin
+intents.message_content = True
+client: Optional['PoxelBotClient'] = None
 
-# Couleurs Thématiques (Fusionnées)
+# --- Couleurs du Thème ---
 NEON_PURPLE = 0x6441a5
 NEON_BLUE = 0x027afa
 NEON_GREEN = 0x00ff99
 RETRO_ORANGE = 0xFF8C00
-DARK_RED = 0x8B0000
 GOLD_COLOR = 0xFFD700
 LIGHT_GREEN = 0x90EE90
 TEAM_COLOR = 0x7289DA
 FREE_GAMES_COLOR = 0x1abc9c
+DARK_RED = 0x8B0000
+# Couleurs Ciné Pixel
 NETFLIX_COLOR = 0xE50914
 DISNEY_COLOR = 0x113CCF
 PRIME_COLOR = 0x00A8E1
-CINEMA_COLOR = 0xFFD700
+CINEMA_COLOR = 0xFFD700 # Or pour le cinéma
 DEFAULT_CINE_COLOR = 0x2C3E50
+
+# Couleurs pour la carte /rank
+RANK_CARD_GRADIENT_START = "#6500ff"
+RANK_CARD_GRADIENT_MID = "#6441a5"
+RANK_CARD_GRADIENT_END = "#027afa"
+
+# --- Couleurs des Notifications ---
 YOUTUBE_COLOR = 0xFF0000
 TWITCH_COLOR = 0x9146FF
 KICK_COLOR = 0x52C41A
 TIKTOK_COLOR = 0x69C9D0
 
-# Assets & URLs
-RANK_CARD_BACKGROUND_URL = "https://cdn.discordapp.com/attachments/1420332458964156467/1431775659448991814/Espace_pixels_00307.jpg"
-RANK_CARD_FONT_URL = "https://github.com/google/fonts/raw/main/ofl/pressstart2p/PressStart2P-Regular.ttf"
+# --- Icônes des Plateformes ---
 YOUTUBE_ICON = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/1024px-YouTube_full-color_icon_%282017%29.svg.png"
 TWITCH_ICON = "https://assets.stickpng.com/images/580b57fcd9996e24bc43c540.png"
 KICK_ICON = "https://logos-world.net/wp-content/uploads/2024/01/Kick-Logo.png"
 TIKTOK_ICON = "https://assets.stickpng.com/images/580b57fcd9996e24bc43c53e.png"
 DEFAULT_ICON = "https://cdn.icon-icons.com/icons2/2716/PNG/512/discord_logo_icon_173101.png"
 
-# Constantes Rank Card
-RANK_CARD_GRADIENT_START = "#6500ff"
-RANK_CARD_GRADIENT_MID = "#6441a5"
-RANK_CARD_GRADIENT_END = "#027afa"
-LEADERBOARD_EMOJIS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+# Icônes Ciné Pixel
+NETFLIX_ICON = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/08/Netflix_2015_logo.svg/1200px-Netflix_2015_logo.svg.png"
+DISNEY_ICON = "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Disney%2B_logo.svg/1200px-Disney%2B_logo.svg.png"
+PRIME_ICON = "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f1/Prime_Video.png/1200px-Prime_Video.png"
+CINEMA_ICON = "https://cdn-icons-png.flaticon.com/512/2809/2809590.png" # Bobine de film
+TMDB_ICON = "https://www.themoviedb.org/assets/2/v4/logos/v2/blue_square_2-d537fb228cf3ded904ef09b136fe3fec72548ebc1fea3fbbd1ad9e36364db38b.svg"
 
-# Timezones
+
+# --- Fuseaux Horaires ---
 USER_TIMEZONE = pytz.timezone('Europe/Paris')
 SERVER_TIMEZONE = pytz.utc
 
-# Noms de fichiers
-DATABASE_FILE = 'poxel_database_unified.json' # Fichier unifié
+# --- Fichiers & Base de Données ---
+DATABASE_FILE = 'poxel_database.json'
 NOTIFICATIONS_FILE = "poxel_notifications.json"
 XP_BACKUP_FILE = 'poxel_xp_backup.json'
 
-# Clés API
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", None)
-TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
-TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", None)
-KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID")
-KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET")
-KICK_USERNAME = os.getenv("KICK_USERNAME", "").lower()
+# --- Carte /rank (Image) ---
+RANK_CARD_BACKGROUND_URL = "https://cdn.discordapp.com/attachments/1420332458964156467/1431775659448991814/Espace_pixels_00307.jpg?ex=692cc8fe&is=692b777e&hm=87344ea49e25994f56dcd69e548498ec0d667f85f744e45932def8c109040128&"
+RANK_CARD_FONT_URL = "https://github.com/google/fonts/raw/main/ofl/pressstart2p/PressStart2P-Regular.ttf"
 
-# Variables Globales Cache
-kick_token = None
-kick_token_expiry = 0
+# Variables globales pour la police et le fond (pour mise en cache)
+pixel_font_path = "PressStart2P-Regular.ttf"
+pixel_font_name = "PressStart2P-Regular"
 pixel_font_l = None
 pixel_font_m = None
 pixel_font_s = None
 rank_card_bg = None
-pixel_font_path = "PressStart2P-Regular.ttf"
+
+# --- Classement ---
+LEADERBOARD_EMOJIS = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+# --- CLÉS API ---
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", None)
+TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
+TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", None) # Pour Ciné Pixel
+
+# --- NOTIFICATIONS KICK ---
+KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID")
+KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET")
+KICK_USERNAME = os.getenv("KICK_USERNAME", "").lower()
+kick_token = None
+kick_token_expiry = 0
+
+# --- Configuration Logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
+logger = logging.getLogger("Poxel") # Renommé en "Poxel"
 
 # ==================================================================================================
-# 3. SERVEUR FLASK
+# 3. SERVEUR FLASK (Pour Hébergement)
 # ==================================================================================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Poxel (Unified) is running!"
+    """Endpoint pour afficher une simple page web (utile pour les hébergeurs)."""
+    return "Poxel est en ligne !"
 
 def run_flask():
+    """Démarre le serveur Flask sur un thread séparé."""
     port = int(os.environ.get('PORT', 8080))
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
     app.run(host='0.0.0.0', port=port)
 
+
 # ==================================================================================================
-# 4. GESTION BASE DE DONNÉES (UNIFIÉE)
+# 4. GESTION DE LA BASE de DONNÉES (JSON)
 # ==================================================================================================
 def load_data():
+    """Charge les données depuis le fichier JSON et initialise les clés nécessaires."""
     if os.path.exists(DATABASE_FILE):
         with open(DATABASE_FILE, 'r', encoding='utf-8') as f:
             try:
                 data = json.load(f)
             except json.JSONDecodeError:
+                logger.error(f"Erreur de décodage JSON dans {DATABASE_FILE}. Création d'une base vide.")
                 data = {}
     else:
         data = {}
 
-    # Initialisation des sections (Fusion des deux bots)
-    data.setdefault("users", {}) # Economy
-    data.setdefault("teams", {}) # Economy
-    data.setdefault("birthdays", {}) # Economy
+    # Initialisation des sections principales
+    data.setdefault("users", {})
+    data.setdefault("teams", {})
+    data.setdefault("birthdays", {})
     data.setdefault("settings", {})
-    data.setdefault("infractions", {}) # Modération
     data.setdefault("avatar_stack", [])
     data.setdefault("avatar_triggers", {})
-    data.setdefault("auto_mod_profiles", {}) # Modération
-    data.setdefault("active_tickets", {}) # Modération
-    data.setdefault("voice_hubs", {}) # Modération
-    data.setdefault("temp_channels", {}) # Modération
-    data.setdefault("embed_builders", {})
-    data.setdefault("reaction_role_messages", {})
-    
-    # Settings fusionnés
+
+    # Initialisation des paramètres (settings)
     settings = data["settings"]
-    # ... Eco settings
-    settings.setdefault("level_up_rewards", {})
-    settings.setdefault("birthday_settings", {})
-    settings.setdefault("free_games_settings", {})
-    settings.setdefault("cine_pixel_settings", {})
-    settings.setdefault("topweek_settings", {})
-    # ... Mod settings
-    settings.setdefault("max_lives_default", 9)
-    settings.setdefault("max_lives_boost", 10)
-    settings.setdefault("life_emoji_full", "❤️")
-    settings.setdefault("life_emoji_empty", "🖤")
-    settings.setdefault("auto_mod_enabled", True)
-    settings.setdefault("censor_enabled", True)
-    settings.setdefault("welcome_channel_id", None)
-    settings.setdefault("farewell_channel_id", None)
-    
+
+    # Personnalisation des Embeds
+    styles = settings.setdefault("embed_styles", {})
+    styles.setdefault("game_win", {"thumbnail_url": "https.url.com/image_victoire_retro.png"})
+    styles.setdefault("game_lose", {"thumbnail_url": "https.url.com/image_defaite_retro.png"})
+    styles.setdefault("game_draw", {"thumbnail_url": "https.url.com/image_egalite_retro.png"})
+    settings.setdefault("time_offset_seconds", 0)
+
+    # XP & Niveaux
+    level_rewards = settings.setdefault("level_up_rewards", {})
+    level_rewards.setdefault("notification_channel_id", None)
+    level_rewards.setdefault("role_rewards", {})
+    level_rewards.setdefault("xp_gain_per_message", {"min": 15, "max": 25})
+    level_rewards.setdefault("xp_gain_cooldown_minutes", 1)
+
+    # Anniversaires
+    birth_settings = settings.setdefault("birthday_settings", {})
+    birth_settings.setdefault("channel_id", None)
+    birth_settings.setdefault("reward_xp", 100)
+
+    # Jeux Gratuits
+    free_games_settings = settings.setdefault("free_games_settings", {})
+    free_games_settings.setdefault("channel_id", None)
+    free_games_settings.setdefault("posted_deals", [])
+
+    # Ciné Pixel (Nouveau)
+    cine_settings = settings.setdefault("cine_pixel_settings", {})
+    cine_settings.setdefault("channel_id", None)
+    cine_settings.setdefault("last_checked_ids", []) # Pour éviter les doublons
+
+    # Topweek
+    topweek_settings = settings.setdefault("topweek_settings", {})
+    topweek_settings.setdefault("channel_id", None)
+    topweek_settings.setdefault("announcement_day", 6)
+    topweek_settings.setdefault("announcement_time", "19:00")
+    topweek_settings.setdefault("last_posted_week", None)
+    topweek_rewards = topweek_settings.setdefault("rewards", {})
+    topweek_rewards.setdefault("first", {"xp": 200})
+    topweek_rewards.setdefault("second", {"xp": 100})
+    topweek_rewards.setdefault("third", {"xp": 50})
+
+    # Avatar Dynamique
+    settings.setdefault("avatar_cooldown_seconds", 300)
+    settings.setdefault("avatar_last_changed", None)
+    settings.setdefault("avatar_enabled", True)
+    settings.setdefault("avatar_default_url", None)
+
+    # IA (Gemini) - SUPPRIMÉ
+    settings.pop("ai_config", None)
+
+    # Écoute Auto-Mod (XP)
+    mod_listener = settings.setdefault("mod_listener_settings", {})
+    mod_listener.setdefault("enabled", True)
+    mod_listener.setdefault("mod_bot_channel_id", None)
+    mod_listener.setdefault("event_bot_channel_id", None)
+    mod_listener.setdefault("xp_penalty", {
+        "warn": -25, "mute": -50, "kick": -100, "tempban": -150, "ban": -250, "signalement": -25
+    })
+    mod_listener.setdefault("xp_reward", {
+        "event_participation": 50, "tournament_win": 200
+    })
+
+    settings.pop("arcade_embed_config", None) 
+    settings.setdefault("embed_styles", {})
+
     return data
 
 def save_data(data):
+    """Sauvegarde les données dans le fichier JSON."""
     try:
         with open(DATABASE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
     except Exception as e:
-        logger.error(f"Erreur sauvegarde DB: {e}")
+        logger.error(f"Erreur lors de la sauvegarde des données dans {DATABASE_FILE}: {e}")
+
+db = load_data()
 
 def load_notif_data():
-    if not os.path.exists(NOTIFICATIONS_FILE): return {"servers": {}, "last_seen": {}, "channel_cache": {}}
+    """Charge les données de notification depuis son fichier dédié."""
+    if not os.path.exists(NOTIFICATIONS_FILE):
+        return {"servers": {}, "last_seen": {}, "channel_cache": {}}
     try:
         with open(NOTIFICATIONS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except: return {"servers": {}, "last_seen": {}, "channel_cache": {}}
+            data = json.load(f)
+            data.setdefault("servers", {})
+            data.setdefault("last_seen", {})
+            data.setdefault("channel_cache", {})
+            return data
+    except json.JSONDecodeError:
+        logger.error(f"Erreur de décodage JSON dans {NOTIFICATIONS_FILE}. Création d'une base vide.")
+        return {"servers": {}, "last_seen": {}, "channel_cache": {}}
+    except Exception as e:
+        logger.exception(f"Erreur imprévue lors de la lecture de {NOTIFICATIONS_FILE}")
+        return {"servers": {}, "last_seen": {}, "channel_cache": {}}
 
 def save_notif_data(data):
+    """Sauvegarde les données de notification."""
     try:
         with open(NOTIFICATIONS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception: pass
+    except Exception as e:
+        logger.error(f"Erreur lors de la sauvegarde des données dans {NOTIFICATIONS_FILE}: {e}")
 
-db = load_data()
 notif_db = load_notif_data()
 
 
 # ==================================================================================================
-# 5. CONSTANTES COMPLÉMENTAIRES (MODÉRATION & JEUX)
-# ==================================================================================================
-
-# Système de Vies (Points d'Infraction)
-INFRACTION_POINTS = {
-    "warn": 1,
-    "mute": 1,
-    "kick": 2,
-    "tempban": 3,
-    "ban": 5,
-    "signalement": 1,
-    "auto_warn": 1,
-    "auto_mute": 1,
-    "auto_kick": 2,
-    "auto_tempban": 3,
-    "auto_ban": 5,
-}
-
-# Avatars Dynamiques (Mapping)
-AVATAR_TRIGGERS_MAP = {
-    'default': 'Avatar par Défaut',
-    'warn': 'Avertissement (Warn)',
-    'mute': 'Rendre Muet (Mute)',
-    'kick': 'Expulsion (Kick)',
-    'ban': 'Bannissement (Ban)',
-    'unban': 'Débannissement (Unban)',
-    'perma_ban': 'Ban Permanent (0 Vie)',
-    'infraction_clear': 'Purge des Infractions',
-    'channel_create': 'Création de Salon Vocal',
-    'channel_delete': 'Suppression de Salon Vocal',
-    'member_join': 'Nouveau Membre',
-    'member_remove': 'Départ d\'un Membre',
-    'rules_accepted': 'Règles Acceptées',
-    'rules_failed': 'Accès Refusé (Règles)',
-    'event_create': 'Création d\'Événement',
-    'event_start': 'Début d\'Événement',
-    'event_end': 'Fin d\'Événement',
-    'tournament_create': 'Création de Tournoi',
-    'tournament_start': 'Début de Tournoi',
-    'tournament_end': 'Fin de Tournoi',
-    'ticket_open': 'Ouverture de Ticket',
-    'xp_gain': 'Gain XP/Level Up', # Ajout Economy
-    'custom': 'Forcé par un Admin'
-}
-
-# Titres & Tournois
-TROPHY_ROLE_NAME = "🏆 Trophée"
-PARTICIPANT_ROLE_NAME = "Tournoi Participant"
-ROUND_NAMES = ["Round 1", "Round 2", "Quart de Finale", "Demi-Finale", "FINALE"]
-TROPHY_TITLES = {
-    1: "👾 Pixie Rookie",
-    3: "🎮 8-Bit Challenger",
-    5: "💾 Retro Master",
-    10: "🕹️ Arcade Legend",
-    20: "🌌 Vintage Champion",
-    50: "🏯 Pixel Overlord",
-    100: "✨ Retro Immortal"
-}
-
-# ==================================================================================================
-# 6. FONCTIONS UTILITAIRES GÉNÉRALES
+# 5. FONCTIONS UTILITAIRES
 # ==================================================================================================
 
 def get_adjusted_time() -> datetime.datetime:
-    """Renvoie l'heure UTC actuelle ajustée avec le décalage du serveur."""
+    """Retourne l'heure UTC actuelle, ajustée par l'offset configuré."""
     offset = db['settings'].get('time_offset_seconds', 0)
-    try: offset_seconds = int(offset)
-    except: offset_seconds = 0
-    return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset_seconds)
-
-def parse_duration(duration_str: str):
-    """Convertit une durée (ex: '10m', '2h') en timedelta."""
-    if not duration_str: return datetime.timedelta(seconds=0)
-    s = duration_str.lower().strip()
-    val = "".join(filter(str.isdigit, s))
-    if not val: return datetime.timedelta(seconds=0)
-    val = int(val)
-    if 'd' in s: return datetime.timedelta(days=val)
-    elif 'h' in s: return datetime.timedelta(hours=val)
-    elif 'm' in s: return datetime.timedelta(minutes=val)
-    elif 's' in s: return datetime.timedelta(seconds=val)
-    return datetime.timedelta(seconds=0)
-
-def format_time_left(end_time_str):
     try:
-        end_time_utc = datetime.datetime.fromisoformat(end_time_str).replace(tzinfo=SERVER_TIMEZONE)
-    except ValueError: return "Heure invalide"
-    now_utc = get_adjusted_time()
-    delta = end_time_utc - now_utc
-    total_seconds = int(delta.total_seconds())
-    if total_seconds < 0: return "TERMINÉ"
-    
-    minutes, seconds = divmod(total_seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    days, hours = divmod(hours, 24)
-    if days > 0: return f"{days}j {hours}h"
-    if hours > 0: return f"{hours}h {minutes}m"
-    return f"{minutes}m {seconds}s"
+        offset_seconds = int(offset)
+    except (ValueError, TypeError):
+        offset_seconds = 0
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    return now_utc + datetime.timedelta(seconds=offset_seconds)
 
 def format_cooldown(delta: datetime.timedelta) -> str:
+    """Formate un timedelta en une chaîne lisible (ex: 3h 25m)."""
     total_seconds = int(delta.total_seconds())
-    if total_seconds <= 0: return "maintenant"
+    if total_seconds <= 0:
+        return "maintenant"
     days, remainder = divmod(total_seconds, 86400)
     hours, remainder = divmod(remainder, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -368,247 +388,123 @@ def format_cooldown(delta: datetime.timedelta) -> str:
     if not parts and seconds > 0: parts.append(f"{seconds}s")
     return " ".join(parts) if parts else "quelques secondes"
 
-async def check_admin_or_organizer(interaction: discord.Interaction, organizer_id: int):
-    is_admin = interaction.user.guild_permissions.administrator
-    is_org = interaction.user.id == organizer_id
-    if not (is_admin or is_org):
-        await interaction.response.send_message("Permission refusée.", ephemeral=True)
-        return False
-    return True
+def get_level_color(level: int) -> int:
+    """Retourne une couleur hexadécimale en fonction du niveau de l'utilisateur."""
+    if 1 <= level <= 5: return LIGHT_GREEN
+    elif 6 <= level <= 10: return NEON_BLUE
+    elif 11 <= level <= 20: return NEON_PURPLE
+    elif 21 <= level <= 50: return RETRO_ORANGE
+    else: return GOLD_COLOR
 
-async def send_private_notification(user: discord.User, title: str, reason: str, mod=None, duration: str = None, damage: int = None, remaining_lives: int = None, is_auto: bool = False):
-    try:
-        author_text = "Le système de sécurité (Auto-Mod)" if is_auto else "Un administrateur"
-        desc = f"**{author_text}** a pris une sanction à votre encontre."
-        color = NEON_GREEN if "UNBAN" in title or "UNMUTE" in title else RETRO_ORANGE
-        
-        embed = discord.Embed(title=f"🚨 {title}", description=desc, color=color)
-        embed.add_field(name="Raison", value=reason, inline=False)
-        if duration: embed.add_field(name="Durée", value=duration, inline=True)
-        if damage and damage > 0: embed.add_field(name="Vies perdues", value=f"- {damage} ❤️", inline=True)
-        if remaining_lives is not None:
-            hearts = "❤️" * remaining_lives + "🖤" * (9 - remaining_lives)
-            embed.add_field(name="Santé", value=f"{remaining_lives} ❤️\n{hearts}", inline=False)
-        
-        embed.set_footer(text="Pour toute réclamation, ouvrez un ticket.")
-        await user.send(embed=embed)
-        return True
-    except: return False
-
-def censor_text(text: str, banned_words: list) -> (str, bool):
-    censored = False
-    words = text.split(' ')
-    out = []
-    for w in words:
-        clean = ''.join(filter(str.isalnum, w)).lower()
-        if clean in banned_words:
-            censored = True
-            out.append('*' * len(w))
-        else:
-            out.append(w)
-    return ' '.join(out), censored
-
-async def update_member_count_channel(guild: discord.Guild):
-    cid = db['settings'].get("member_count_channel_id")
-    if not cid: return
-    ch = guild.get_channel(cid)
-    if ch:
-        try: await ch.edit(name=f"📊 Membres : {guild.member_count}")
-        except: pass
-
-def apply_embed_styles(embed: discord.Embed, style_key: str):
-    styles = db.get("settings", {}).get("embed_styles", {}).get(style_key, {})
-    if styles.get("thumbnail_url"): embed.set_thumbnail(url=styles["thumbnail_url"])
-    if styles.get("footer_image_url"):
-        footer_text = embed.footer.text if embed.footer.text else ""
-        embed.set_footer(text=footer_text, icon_url=styles["footer_image_url"])
-    return embed
-
-async def translate_to_french(text: str) -> str:
-    if not text or not TRANSLATOR_AVAILABLE: return text
-    try:
-        loop = asyncio.get_event_loop()
-        translated = await loop.run_in_executor(None, lambda: GoogleTranslator(source='auto', target='fr').translate(text))
-        return translated if translated else text
-    except Exception as e:
-        logger.warning(f"Erreur traduction: {e}")
-        return text
-
-# --- CORE WEB REQUEST (Hérité de Economy - Version Robuste) ---
+# --- NOUVEAU: fetch_url (Refonte "Pingcord": utilise requests avec User-Agent) ---
 async def fetch_url(url: str, response_type: str = 'text', headers: Optional[Dict] = None, params: Optional[Dict] = None, data: Optional[Dict] = None, method: str = 'GET', timeout: int = 20) -> Optional[Any]:
+    """
+    Fonction générique pour récupérer du contenu.
+    - 'bytes': Utilise 'requests' (pour images/fichiers).
+    - 'text'/'json': Utilise 'requests' avec un User-Agent (pour contourner le blocage 403).
+    - 'data': Permet d'envoyer une payload JSON (pour POST, ex: token Kick)
+    """
+    
+    # Préparer les headers
     request_headers = headers or {}
+    
+    # Cas 1: Téléchargement de fichiers (images, polices)
     if response_type == 'bytes':
         try:
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, lambda: requests.get(url, headers=request_headers, params=params, timeout=timeout))
+            response = await loop.run_in_executor(
+                None, 
+                lambda: requests.get(url, headers=request_headers, params=params, timeout=timeout)
+            )
             response.raise_for_status()
             return response.content
         except requests.exceptions.RequestException as e:
-            logger.error(f"fetch_url (bytes) échoué pour {url}: {e}")
+            logger.error(f"fetch_url (requests/bytes) a échoué pour {url}: {e}")
             return None
-
+    
+    # Cas 2: Récupération d'API (JSON) ou Texte (Scraping simple)
+    # On ajoute un User-Agent pour ressembler à un navigateur (Style Pingcord)
     if 'User-Agent' not in request_headers:
         request_headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 
     try:
         loop = asyncio.get_event_loop()
-        request_args = {"url": url, "headers": request_headers, "params": params, "timeout": timeout}
+        
+        # Préparer les arguments pour requests
+        request_args = {
+            "url": url,
+            "headers": request_headers,
+            "params": params,
+            "timeout": timeout
+        }
+        
+        # Gérer la payload (ex: pour POST)
         if data:
-            if method.upper() == 'POST' and request_headers.get("Content-Type") == "application/json": request_args["json"] = data
-            else: request_args["data"] = data
+            # Si c'est un POST et que le Content-Type est JSON, requests gère la sérialisation
+            if method.upper() == 'POST' and request_headers.get("Content-Type") == "application/json":
+                request_args["json"] = data
+            else:
+                request_args["data"] = data
 
-        if method.upper() == 'POST': response = await loop.run_in_executor(None, lambda: requests.post(**request_args))
-        else: response = await loop.run_in_executor(None, lambda: requests.get(**request_args))
+        # Exécuter la requête (GET ou POST)
+        if method.upper() == 'POST':
+            response = await loop.run_in_executor(
+                None, 
+                lambda: requests.post(**request_args)
+            )
+        else: # GET par défaut
+             response = await loop.run_in_executor(
+                None, 
+                lambda: requests.get(**request_args)
+            )
 
-        response.raise_for_status()
+        response.raise_for_status() # Lève une erreur si 4xx/5xx
         
         if response_type == 'json':
-            try: return response.json()
+            try:
+                return response.json()
             except json.JSONDecodeError as e:
-                logger.error(f"fetch_url (json) Erreur décodage pour {url}: {e}")
+                logger.error(f"fetch_url (requests/json) Erreur JSON pour {url}: {e}. Contenu: {response.text[:150]}...")
                 return None
-        else: return response.text
-    except requests.exceptions.RequestException as e:
-        status = e.response.status_code if e.response is not None else "N/A"
-        if status != 404: logger.error(f"fetch_url (api) échoué pour {url} (Code: {status}): {e}")
-        return None
-    except Exception as e:
-        logger.exception(f"fetch_url (api) Erreur fatale pour {url}: {e}")
-        return None
-
-# ==================================================================================================
-# 7. MOTEUR GRAPHIQUE (RANK CARD - PIXEL ART)
-# ==================================================================================================
-
-def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
-    h = hex_color.lstrip('#')
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
-def create_gradient_image(width: int, height: int, start_hex: str, mid_hex: str, end_hex: str) -> Image:
-    if not PIL_AVAILABLE: return None
-    start_rgb = hex_to_rgb(start_hex)
-    mid_rgb = hex_to_rgb(mid_hex)
-    end_rgb = hex_to_rgb(end_hex)
-    img = Image.new("RGB", (width, height))
-    draw = ImageDraw.Draw(img)
-    mid_point = width // 2
-    for x in range(width):
-        if x < mid_point:
-            ratio = x / mid_point
-            r = int(start_rgb[0] * (1 - ratio) + mid_rgb[0] * ratio)
-            g = int(start_rgb[1] * (1 - ratio) + mid_rgb[1] * ratio)
-            b = int(start_rgb[2] * (1 - ratio) + mid_rgb[2] * ratio)
         else:
-            ratio = (x - mid_point) / (width - mid_point)
-            r = int(mid_rgb[0] * (1 - ratio) + end_rgb[0] * ratio)
-            g = int(mid_rgb[1] * (1 - ratio) + end_rgb[1] * ratio)
-            b = int(mid_rgb[2] * (1 - ratio) + end_rgb[2] * ratio)
-        draw.line([(x, 0), (x, height)], fill=(r, g, b))
-    return img
-
-def download_and_cache_assets():
-    global pixel_font_l, pixel_font_m, pixel_font_s, rank_card_bg, PIL_AVAILABLE
-    if not PIL_AVAILABLE: return
-    
-    if not os.path.exists(pixel_font_path):
-        try:
-            response = requests.get(RANK_CARD_FONT_URL)
-            response.raise_for_status()
-            with open(pixel_font_path, "wb") as f: f.write(response.content)
-        except Exception as e:
-            logger.error(f"Download Font Error: {e}")
-            PIL_AVAILABLE = False
-            return
-
-    if pixel_font_l is None:
-        try:
-            pixel_font_l = ImageFont.truetype(pixel_font_path, 20)
-            pixel_font_m = ImageFont.truetype(pixel_font_path, 12)
-            pixel_font_s = ImageFont.truetype(pixel_font_path, 10)
-        except Exception: PIL_AVAILABLE = False; return
-
-    if rank_card_bg is None:
-        try:
-            response = requests.get(RANK_CARD_BACKGROUND_URL)
-            response.raise_for_status()
-            img_bytes = io.BytesIO(response.content)
-            rank_card_bg = Image.open(img_bytes).convert("RGBA")
-        except Exception: PIL_AVAILABLE = False; return
-
-async def generate_rank_card_image(current_xp: int, required_xp: int, level: int, global_rank: int, weekly_rank: int, username: str, avatar_url: str) -> Optional[io.BytesIO]:
-    if not PIL_AVAILABLE: return None
-    download_and_cache_assets()
-    if not PIL_AVAILABLE or rank_card_bg is None or pixel_font_l is None: return None
-
-    try:
-        card_width, card_height, avatar_size, padding = 600, 180, 128, 20
-        img = rank_card_bg.copy()
-        img = ImageOps.fit(img, (card_width, card_height), method=Image.Resampling.LANCZOS)
-        overlay = Image.new("RGBA", (card_width, card_height), (0, 0, 0, 150))
-        img = Image.alpha_composite(img, overlay)
-        draw = ImageDraw.Draw(img)
-
-        avatar_bytes = await fetch_url(avatar_url, response_type='bytes')
-        if avatar_bytes:
-            avatar_img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-            avatar_img = avatar_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (avatar_size, avatar_size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, avatar_size, avatar_size), fill=255)
-            avatar_img.putalpha(mask)
-            img.paste(avatar_img, (padding, (card_height - avatar_size) // 2), avatar_img)
-
-        text_start_x = padding + avatar_size + padding
-        text_width = card_width - text_start_x - padding
-        
-        # Rank & Level
-        rank_val, level_val = f"#{global_rank}", f"{level}"
-        level_val_size = draw.textlength(level_val, font=pixel_font_l)
-        level_val_x = card_width - padding - level_val_size
-        level_text_size = draw.textlength("NIVEAU", font=pixel_font_m)
-        level_text_x = level_val_x - level_text_size - 8
-        rank_val_size = draw.textlength(rank_val, font=pixel_font_l)
-        rank_val_x = level_text_x - rank_val_size - padding
-        rank_text_size = draw.textlength("RANG", font=pixel_font_m)
-        
-        text_y = padding + 5
-        draw.text((rank_val_x - rank_text_size - 8, text_y + 4), "RANG", fill=(200, 200, 200), font=pixel_font_m)
-        draw.text((rank_val_x, text_y), rank_val, fill=(255, 255, 255), font=pixel_font_l)
-        draw.text((level_text_x, text_y + 4), "NIVEAU", fill=(200, 200, 200), font=pixel_font_m)
-        draw.text((level_val_x, text_y), level_val, fill=hex_to_rgb(RANK_CARD_GRADIENT_END), font=pixel_font_l)
-
-        # Username
-        draw.text((text_start_x, text_y + 35), username[:20], fill=(255, 255, 255), font=pixel_font_l)
-
-        # XP Bar
-        bar_height, bar_y, bar_frame = 28, text_y + 70, 3
-        progress = min(1.0, current_xp / required_xp) if required_xp > 0 else 1.0
-        bar_width_filled = int(text_width * progress)
-        
-        draw.rectangle((text_start_x, bar_y, text_start_x + text_width, bar_y + bar_height), outline=(200, 200, 200), width=bar_frame)
-        draw.rectangle((text_start_x + bar_frame, bar_y + bar_frame, text_start_x + text_width - bar_frame, bar_y + bar_height - bar_frame), fill=(40, 40, 40))
-        
-        if bar_width_filled > bar_frame * 2:
-            grad = create_gradient_image(bar_width_filled, bar_height - bar_frame * 2, RANK_CARD_GRADIENT_START, RANK_CARD_GRADIENT_MID, RANK_CARD_GRADIENT_END)
-            img.paste(grad, (text_start_x + bar_frame, bar_y + bar_frame))
-            for x in range(text_start_x + bar_frame + 10, text_start_x + bar_width_filled, 10):
-                draw.line((x, bar_y + bar_frame, x, bar_y + bar_height - bar_frame), fill=(0, 0, 0, 100), width=1)
-
-        # Footer Stats
-        xp_text = f"{current_xp} / {required_xp} XP"
-        draw.text((card_width - padding - draw.textlength(xp_text, font=pixel_font_m), text_y + 45), xp_text, fill=(220, 220, 220), font=pixel_font_m)
-        draw.text((text_start_x, bar_y + bar_height + 10), f"TOP WEEK: #{weekly_rank}" if weekly_rank > 0 else "TOP WEEK: N/A", fill=(200, 200, 200), font=pixel_font_s)
-
-        buffer = io.BytesIO()
-        img.save(buffer, format='PNG')
-        buffer.seek(0)
-        return buffer
+            return response.text # response_type == 'text'
+            
+    except requests.exceptions.RequestException as e:
+        status_code = e.response.status_code if e.response is not None else "N/A"
+        # Ne pas logger en erreur si c'est un 404 (ex: Kick offline)
+        if status_code == 404:
+             logger.info(f"fetch_url (requests/api) a reçu un 404 (Not Found) pour {url}. C'est normal si hors ligne.")
+        else:
+            logger.error(f"fetch_url (requests/api) a échoué pour {url} (Code: {status_code}): {e}")
+        return None
     except Exception as e:
-        logger.error(f"Rank Card Error: {e}")
+        logger.exception(f"fetch_url (requests/api) Erreur fatale pour {url}: {e}")
         return None
 
 
+def apply_embed_styles(embed: discord.Embed, style_key: str):
+    """Applique les styles d'images personnalisés (thumbnail, footer) à un embed."""
+    styles = db.get("settings", {}).get("embed_styles", {}).get(style_key, {})
+    
+    if styles.get("thumbnail_url"):
+        embed.set_thumbnail(url=styles["thumbnail_url"])
+        
+    if styles.get("footer_image_url"):
+        # Si l'embed a déjà un footer, on préserve le texte
+        footer_text = embed.footer.text if embed.footer.text else ""
+        embed.set_footer(text=footer_text, icon_url=styles["footer_image_url"])
+    
+    return embed # Retourne l'embed modifié
+
 # ==================================================================================================
-# 8. SYSTÈME D'XP & NIVEAUX (LOGIQUE)
+# 6. SYSTÈME D'IA GEMINI (SUPPRIMÉ)
+# ==================================================================================================
+
+# (Code pour la classe GeminiAI et son initialisation supprimé)
+
+
+# ==================================================================================================
+# 7. SYSTÈME D'XP & NIVEAUX (Mis à jour pour /rank)
 # ==================================================================================================
 
 def get_user_xp_data(user_id: int) -> Dict[str, Any]:
@@ -679,6 +575,241 @@ def get_weekly_rank(user_id: int) -> int:
         if uid_str == str(user_id):
             return i + 1
     return -1
+# --- Fonctions de génération de la carte /rank (Pixel Art) ---
+
+def hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    """Convertit #RRGGBB en (R, G, B)."""
+    h = hex_color.lstrip('#')
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+def create_gradient_image(width: int, height: int, start_hex: str, mid_hex: str, end_hex: str) -> Image:
+    """Crée une image de dégradé linéaire horizontal."""
+    start_rgb = hex_to_rgb(start_hex)
+    mid_rgb = hex_to_rgb(mid_hex)
+    end_rgb = hex_to_rgb(end_hex)
+    
+    img = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(img)
+    
+    mid_point = width // 2
+    
+    for x in range(width):
+        if x < mid_point:
+            # Dégradé de start à mid
+            ratio = x / mid_point
+            r = int(start_rgb[0] * (1 - ratio) + mid_rgb[0] * ratio)
+            g = int(start_rgb[1] * (1 - ratio) + mid_rgb[1] * ratio)
+            b = int(start_rgb[2] * (1 - ratio) + mid_rgb[2] * ratio)
+        else:
+            # Dégradé de mid à end
+            ratio = (x - mid_point) / (width - mid_point)
+            r = int(mid_rgb[0] * (1 - ratio) + end_rgb[0] * ratio)
+            g = int(mid_rgb[1] * (1 - ratio) + end_rgb[1] * ratio)
+            b = int(mid_rgb[2] * (1 - ratio) + end_rgb[2] * ratio)
+        
+        draw.line([(x, 0), (x, height)], fill=(r, g, b))
+        
+    return img
+
+def download_and_cache_assets():
+    """Télécharge la police et l'image de fond si elles n'existent pas."""
+    global pixel_font_l, pixel_font_m, pixel_font_s, rank_card_bg, PIL_AVAILABLE
+    
+    if not PIL_AVAILABLE:
+        return
+
+    # 1. Télécharger la police
+    if not os.path.exists(pixel_font_path):
+        try:
+            logger.info(f"Téléchargement de la police pixel depuis {RANK_CARD_FONT_URL}...")
+            # Utilise requests (synchrone) car c'est une tâche de démarrage
+            response = requests.get(RANK_CARD_FONT_URL)
+            response.raise_for_status()
+            with open(pixel_font_path, "wb") as f:
+                f.write(response.content)
+            logger.info("Police téléchargée avec succès.")
+        except Exception as e:
+            logger.error(f"Impossible de télécharger la police pixel: {e}")
+            PIL_AVAILABLE = False
+            return
+
+    # 2. Charger les polices en mémoire
+    if pixel_font_l is None:
+        try:
+            pixel_font_l = ImageFont.truetype(pixel_font_path, 20) # Pour le nom
+            pixel_font_m = ImageFont.truetype(pixel_font_path, 12) # Pour XP/Niveau
+            pixel_font_s = ImageFont.truetype(pixel_font_path, 10) # Pour Top Week
+        except Exception as e:
+            logger.error(f"Impossible de charger la police pixel: {e}")
+            PIL_AVAILABLE = False
+            return
+
+    # 3. Télécharger et mettre en cache l'image de fond
+    if rank_card_bg is None:
+        try:
+            logger.info("Téléchargement de l'image de fond de la carte /rank...")
+            # Utilise requests (synchrone)
+            response = requests.get(RANK_CARD_BACKGROUND_URL)
+            response.raise_for_status()
+            img_bytes = io.BytesIO(response.content)
+            rank_card_bg = Image.open(img_bytes).convert("RGBA")
+            logger.info("Image de fond mise en cache.")
+        except Exception as e:
+            logger.error(f"Impossible de télécharger l'image de fond: {e}")
+            PIL_AVAILABLE = False
+            return
+
+async def generate_rank_card_image(
+    current_xp: int, 
+    required_xp: int, 
+    level: int, 
+    global_rank: int, 
+    weekly_rank: int, 
+    username: str, 
+    avatar_url: str
+) -> Optional[io.BytesIO]:
+    """
+    Génère l'image de la carte /rank style pixel art, basée sur Image 1 & 2.
+    """
+    global PIL_AVAILABLE
+    if not PIL_AVAILABLE: return None
+
+    # S'assurer que les assets sont chargés (la fonction est synchrone)
+    download_and_cache_assets()
+    if not PIL_AVAILABLE or rank_card_bg is None or pixel_font_l is None:
+        logger.error("Génération /rank annulée : assets non disponibles.")
+        return None
+
+    try:
+        # --- Dimensions (Style Image 1) ---
+        card_width = 600
+        card_height = 180
+        avatar_size = 128
+        padding = 20
+
+        # --- Créer le fond ---
+        # Utiliser une copie du fond en cache
+        img = rank_card_bg.copy()
+        # Redimensionner et rogner le fond pour s'adapter à la carte
+        img = ImageOps.fit(img, (card_width, card_height), method=Image.Resampling.LANCZOS)
+        # Ajouter un filtre sombre pour la lisibilité
+        overlay = Image.new("RGBA", (card_width, card_height), (0, 0, 0, 150))
+        img = Image.alpha_composite(img, overlay)
+        draw = ImageDraw.Draw(img)
+
+        # --- Télécharger et préparer l'avatar ---
+        # (Modifié pour utiliser la nouvelle fetch_url hybride)
+        avatar_bytes = await fetch_url(avatar_url, response_type='bytes')
+        if not avatar_bytes:
+            avatar_img = Image.new('RGBA', (avatar_size, avatar_size), (80, 80, 80))
+        else:
+            avatar_img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+            avatar_img = avatar_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
+
+        # Créer un masque circulaire (Style Image 1)
+        mask = Image.new("L", (avatar_size, avatar_size), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
+
+        # Appliquer le masque
+        avatar_img.putalpha(mask)
+        # Coller l'avatar
+        avatar_x = padding
+        avatar_y = (card_height - avatar_size) // 2
+        img.paste(avatar_img, (avatar_x, avatar_y), avatar_img)
+
+        # --- Positions du texte ---
+        text_start_x = avatar_x + avatar_size + padding
+        text_width = card_width - text_start_x - padding
+
+        # --- Dessiner RANG et NIVEAU (Style Image 1) ---
+        rank_text = "RANG"
+        rank_val = f"#{global_rank}"
+        level_text = "NIVEAU"
+        level_val = f"{level}"
+        
+        # Positions en haut à droite
+        level_val_size = draw.textlength(level_val, font=pixel_font_l)
+        level_val_x = card_width - padding - level_val_size
+        level_text_size = draw.textlength(level_text, font=pixel_font_m)
+        level_text_x = level_val_x - level_text_size - 8
+        
+        rank_val_size = draw.textlength(rank_val, font=pixel_font_l)
+        rank_val_x = level_text_x - rank_val_size - padding
+        rank_text_size = draw.textlength(rank_text, font=pixel_font_m)
+        rank_text_x = rank_val_x - rank_text_size - 8
+
+        text_y = padding + 5
+        draw.text((rank_text_x, text_y + 4), rank_text, fill=(200, 200, 200), font=pixel_font_m)
+        draw.text((rank_val_x, text_y), rank_val, fill=(255, 255, 255), font=pixel_font_l)
+        draw.text((level_text_x, text_y + 4), level_text, fill=(200, 200, 200), font=pixel_font_m)
+        draw.text((level_val_x, text_y), level_val, fill=hex_to_rgb(RANK_CARD_GRADIENT_END), font=pixel_font_l)
+
+        # --- Dessiner le nom d'utilisateur ---
+        username = username[:20] # Limiter la longueur
+        username_y = text_y + 35
+        draw.text((text_start_x, username_y), username, fill=(255, 255, 255), font=pixel_font_l)
+
+        # --- Barre d'XP (Style Image 2) ---
+        bar_height = 28
+        bar_y = username_y + 35
+        bar_frame_thickness = 3
+        bar_inner_height = bar_height - (bar_frame_thickness * 2)
+        
+        progress_percentage = min(1.0, current_xp / required_xp) if required_xp > 0 else 1.0
+        bar_width_filled = int(text_width * progress_percentage)
+
+        # Dessiner le cadre de la barre (style pixel art)
+        draw.rectangle(
+            (text_start_x, bar_y, text_start_x + text_width, bar_y + bar_height),
+            outline=(200, 200, 200), width=bar_frame_thickness
+        )
+        # Dessiner le fond intérieur
+        draw.rectangle(
+            (text_start_x + bar_frame_thickness, bar_y + bar_frame_thickness, 
+             text_start_x + text_width - bar_frame_thickness, bar_y + bar_height - bar_frame_thickness),
+            fill=(40, 40, 40)
+        )
+        
+        # Dessiner la partie remplie (avec dégradé)
+        if bar_width_filled > bar_frame_thickness * 2:
+            gradient_img = create_gradient_image(
+                bar_width_filled, 
+                bar_inner_height, 
+                RANK_CARD_GRADIENT_START, 
+                RANK_CARD_GRADIENT_MID, 
+                RANK_CARD_GRADIENT_END
+            )
+            img.paste(gradient_img, (text_start_x + bar_frame_thickness, bar_y + bar_frame_thickness))
+
+            # Dessiner les "cellules" (Style Image 2)
+            cell_width = 10
+            for x in range(text_start_x + bar_frame_thickness + cell_width, text_start_x + bar_width_filled, cell_width):
+                draw.line(
+                    (x, bar_y + bar_frame_thickness, x, bar_y + bar_height - bar_frame_thickness),
+                    fill=(0, 0, 0, 100), width=1
+                )
+
+        # --- Texte XP ---
+        xp_text = f"{current_xp} / {required_xp} XP"
+        xp_text_x = card_width - padding - draw.textlength(xp_text, font=pixel_font_m)
+        draw.text((xp_text_x, username_y + 10), xp_text, fill=(220, 220, 220), font=pixel_font_m, anchor="ra")
+
+        # --- Rang Top Week (Sous la barre) ---
+        weekly_rank_text = f"TOP WEEK: #{weekly_rank}" if weekly_rank > 0 else "TOP WEEK: Non classé"
+        weekly_text_y = bar_y + bar_height + 10
+        draw.text((text_start_x, weekly_text_y), weekly_rank_text, fill=(200, 200, 200), font=pixel_font_s)
+
+        # Sauvegarder l'image en mémoire
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        buffer.seek(0)
+        return buffer
+
+    except Exception as e:
+        logger.exception(f"Erreur lors de la génération de l'image /rank: {e}")
+        return None
+
 
 async def check_and_handle_progression(member: discord.Member, channel: Optional[discord.TextChannel] = None):
     """
@@ -711,296 +842,128 @@ async def check_and_handle_progression(member: discord.Member, channel: Optional
                     try:
                         await member.add_roles(role_to_add, reason=f"Atteinte du niveau {new_level}")
                         reward_messages.append(f"✨ Rôle obtenu : {role_to_add.mention}")
+                        logger.info(f"Rôle {role_to_add.name} attribué à {member.display_name} pour le niveau {new_level}.")
                     except discord.Forbidden:
-                        logger.error(f"Permissions manquantes pour ajouter le rôle {role_to_add.name}")
-            except ValueError: pass
+                        logger.error(f"Permissions manquantes pour ajouter le rôle {role_to_add.name} à {member.display_name}")
+                    except discord.HTTPException as e:
+                        logger.error(f"Erreur HTTP lors de l'ajout du rôle {role_to_add.name} à {member.display_name}: {e}")
+                elif not role_to_add:
+                    logger.warning(f"Le rôle récompense configuré pour le niveau {new_level} (ID: {role_id_to_add_str}) est introuvable.")
+            except ValueError:
+                logger.error(f"ID de rôle invalide configuré pour le niveau {new_level}: {role_id_to_add_str}")
 
         # Préparer le message de félicitations
         level_up_desc = f"🎉 GG {member.mention} ! Tu passes au **Niveau {new_level}** !"
         if reward_messages:
             level_up_desc += "\n\n**Récompenses :**\n" + "\n".join(reward_messages)
 
-        def get_level_color(lvl):
-            if 1 <= lvl <= 5: return LIGHT_GREEN
-            elif 6 <= lvl <= 10: return NEON_BLUE
-            elif 11 <= lvl <= 20: return NEON_PURPLE
-            elif 21 <= lvl <= 50: return RETRO_ORANGE
-            else: return GOLD_COLOR
-
         embed = discord.Embed(title="🌟 LEVEL UP! 🌟", description=level_up_desc, color=get_level_color(new_level))
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text="Continue à être actif pour grimper dans le classement ! 💬")
         
+        # Appliquer le style d'embed personnalisé
         embed = apply_embed_styles(embed, "level_up")
 
         # Envoyer la notification publique
         public_notif_channel_id = rewards_settings.get("notification_channel_id")
-        # Utiliser le client global s'il est dispo, sinon utiliser le channel passé en arg
-        public_notif_channel = None
-        if client and public_notif_channel_id:
-            public_notif_channel = client.get_channel(public_notif_channel_id)
-        
-        target_channel = public_notif_channel or channel
+        public_notif_channel = client.get_channel(public_notif_channel_id) if public_notif_channel_id else channel
 
-        if target_channel:
+        if public_notif_channel:
             try:
-                await target_channel.send(embed=embed)
-            except: pass
+                await public_notif_channel.send(embed=embed)
+            except discord.Forbidden:
+                logger.error(f"Permissions manquantes pour l'annonce de montée de niveau dans {public_notif_channel.name}")
+            except Exception as e:
+                logger.error(f"Erreur inattendue lors de l'envoi de l'annonce de level up: {e}")
 
-        # Envoyer la notification privée
+        # Envoyer la notification privée (si activée)
         if not user_data.get("dm_notifications_disabled", False):
             try:
                 await member.send(embed=embed)
-            except: pass
+            except discord.Forbidden:
+                logger.warning(f"Impossible d'envoyer un MP de level up à {member.display_name} (MP bloqués).")
+            except Exception as e:
+                logger.error(f"Erreur inattendue lors de l'envoi du MP de level up: {e}")
 
         # Déclencher l'avatar dynamique
         await trigger_avatar_change('xp_gain')
 
     if leveled_up:
-        save_data(db)
+        save_data(db) # Sauvegarder uniquement si un level up a eu lieu
+
 
 async def update_user_xp(user_id: int, xp_change: int, is_weekly_xp: bool = True):
     """Met à jour l'XP total et hebdomadaire d'un utilisateur."""
-    if xp_change == 0: return
+    if xp_change == 0:
+        return
 
     user_data = get_user_xp_data(user_id)
+
     user_data["xp"] = max(0, user_data["xp"] + xp_change)
     if is_weekly_xp and xp_change > 0:
         user_data["weekly_xp"] = max(0, user_data.get("weekly_xp", 0) + xp_change)
+
     return user_data
 
 # ==================================================================================================
-# 9. SYSTÈME DE VIES & INFRACTIONS (LOGIQUE)
+# 8. SYSTÈME D'ANNIVERSAIRE
 # ==================================================================================================
 
-def get_total_infraction_points(user_id: int) -> int:
-    infs = db['infractions'].get(str(user_id), [])
-    return sum(i.get('points_lost', 0) for i in infs)
+@tasks.loop(time=datetime.time(hour=0, minute=1, tzinfo=SERVER_TIMEZONE))
+async def check_birthdays():
+    """Tâche de fond qui vérifie et annonce les anniversaires."""
+    try:
+        await client.wait_until_ready()
+        logger.info("Vérification des anniversaires...")
+        today_str = get_adjusted_time().strftime("%m-%d")
 
-def get_max_lives(member: discord.Member) -> int:
-    if not isinstance(member, discord.Member): return db['settings'].get("max_lives_default", 9)
-    return db['settings'].get("max_lives_boost", 10) if member.premium_since else db['settings'].get("max_lives_default", 9)
+        settings = db["settings"].get("birthday_settings", {})
+        channel_id = settings.get("channel_id")
+        reward_xp = settings.get("reward_xp", 100)
 
-def display_lives(member: discord.Member, custom_points: int = None) -> str:
-    max_lives = get_max_lives(member)
-    lost = custom_points if custom_points is not None else get_total_infraction_points(member.id)
-    
-    fh = db['settings'].get("life_emoji_full", "❤️")
-    eh = db['settings'].get("life_emoji_empty", "🖤")
-    bh = db['settings'].get("life_emoji_boost", "💛")
-    
-    current = max(0, max_lives - lost)
-    is_boosted = max_lives > 9
-    
-    hearts = []
-    for i in range(1, max_lives + 1):
-        if i <= current:
-            if i == 10 and is_boosted: hearts.append(bh)
-            else: hearts.append(fh)
-        else:
-            hearts.append(eh)
-            
-    return "".join(hearts)
+        if not channel_id:
+            return
 
-async def check_perma_ban(client: discord.Client, member: discord.Member):
-    max_l = get_max_lives(member)
-    pts = get_total_infraction_points(member.id)
-    if pts >= max_l:
-        r = f"GAME OVER: {pts}/{max_l} vies perdues."
+        channel = client.get_channel(channel_id)
+        if not channel:
+            return
+
+        birthdays_today = []
+        for user_id_str, bday_date in db.get("birthdays", {}).items():
+            if bday_date == today_str:
+                try:
+                    user_id = int(user_id_str)
+                    member = None
+                    for guild in client.guilds:
+                        member = guild.get_member(user_id)
+                        if member: break
+                    if member: birthdays_today.append(member)
+                except ValueError: pass
+
+        if not birthdays_today: return
+
+        mentions = ", ".join(m.mention for m in birthdays_today)
+        embed = discord.Embed(title="🎂 Joyeux Anniversaire ! 🎂", description=f"Bon anniversaire à {mentions} ! 🎉", color=GOLD_COLOR)
+        embed = apply_embed_styles(embed, "birthday_announce")
+
         try:
-            await send_private_notification(member, "BAN DÉFINITIF", r, remaining_lives=0, is_auto=True)
-            await member.ban(reason=r)
-            await trigger_avatar_change('perma_ban')
-            return True
-        except: pass
-    return False
+            await channel.send(content="@everyone", embed=embed)
+        except Exception as e:
+            logger.error(f"Erreur envoi anniversaire: {e}")
 
-def add_infraction_with_life_check(client, interaction, member, type, reason, custom_points=None, profile_name=None, send_dm=True):
-    pts = custom_points if custom_points is not None else INFRACTION_POINTS.get(type, 0)
-    rec = {
-        "type": type, "reason": reason, "points_lost": pts,
-        "timestamp": get_adjusted_time().isoformat(),
-        "profile": profile_name
-    }
-    db['infractions'].setdefault(str(member.id), []).append(rec)
-    save_data(db)
-    
-    if client:
-        asyncio.create_task(check_perma_ban(client, member))
-    
-    if send_dm:
-        max_l = get_max_lives(member)
-        cur = get_total_infraction_points(member.id)
-        rem = max(0, max_l - cur)
-        asyncio.create_task(send_private_notification(member, f"SANCTION ({type.upper()})", reason, damage=pts, remaining_lives=rem, is_auto=True))
-    
-    return True
-
-# ==================================================================================================
-# 10. ACTIONS DE MODÉRATION (LOGIQUE PURE)
-# ==================================================================================================
-
-async def poxel_ban_logic(interaction: discord.Interaction, user: discord.User, reason: str, custom_points: int = None):
-    """Logique centrale du Ban."""
-    await interaction.response.defer(ephemeral=True)
-    member = interaction.guild.get_member(user.id)
-    max_lives = get_max_lives(member) if member else db['settings'].get("max_lives_default", 9)
-    points = custom_points if custom_points is not None else INFRACTION_POINTS.get("ban", 5)
-    current_loss = get_total_infraction_points(user.id)
-    remaining = max(0, max_lives - (current_loss + points))
-
-    await send_private_notification(user, "BAN PERMANENT", reason, interaction.user, duration="Définitif", damage=points, remaining_lives=remaining)
-    await asyncio.sleep(2)
-
-    try:
-        await interaction.guild.ban(user, reason=reason)
-        add_infraction_with_life_check(client, interaction, user, "ban", reason, custom_points=points, send_dm=False)
-        await trigger_avatar_change('ban')
-        await interaction.followup.send(f"✅ **{user.name}** a été banni (MP envoyé).", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.followup.send("❌ Erreur : Je n'ai pas la permission de bannir cet utilisateur.", ephemeral=True)
-
-async def poxel_tempban_logic(interaction: discord.Interaction, user: discord.User, duration_str: str, reason: str, custom_points: int = None):
-    """Logique centrale du Tempban."""
-    await interaction.response.defer(ephemeral=True)
-    delta = parse_duration(duration_str)
-    if delta.total_seconds() <= 0: return await interaction.followup.send("❌ Durée invalide.", ephemeral=True)
-
-    member = interaction.guild.get_member(user.id)
-    max_lives = get_max_lives(member) if member else db['settings'].get("max_lives_default", 9)
-    points = custom_points if custom_points is not None else INFRACTION_POINTS.get("tempban", 3)
-    current_loss = get_total_infraction_points(user.id)
-    remaining = max(0, max_lives - (current_loss + points))
-
-    await send_private_notification(user, "TEMPBAN", reason, interaction.user, duration=duration_str, damage=points, remaining_lives=remaining)
-    await asyncio.sleep(2)
-
-    unban_time = get_adjusted_time() + delta
-    db.setdefault('scheduled_unbans', []).append({"guild_id": interaction.guild_id, "user_id": user.id, "unban_at": unban_time.isoformat()})
-    save_data(db)
-
-    try:
-        await interaction.guild.ban(user, reason=f"Tempban ({duration_str}): {reason}")
-        add_infraction_with_life_check(client, interaction, user, "tempban", f"({duration_str}) {reason}", custom_points=points, send_dm=False)
-        await trigger_avatar_change('ban')
-        await interaction.followup.send(f"✅ **{user.name}** banni pour {duration_str} (MP envoyé).", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.followup.send("❌ Erreur permission.", ephemeral=True)
-
-async def poxel_kick_logic(interaction: discord.Interaction, member: discord.Member, reason: str, custom_points: int = None):
-    await interaction.response.defer(ephemeral=True)
-    points = custom_points if custom_points is not None else INFRACTION_POINTS.get("kick", 2)
-    max_lives = get_max_lives(member)
-    current_loss = get_total_infraction_points(member.id)
-    remaining = max(0, max_lives - (current_loss + points))
-
-    await send_private_notification(member, "KICK (EXPULSION)", reason, interaction.user, damage=points, remaining_lives=remaining)
-    await asyncio.sleep(2)
-
-    try:
-        await member.kick(reason=reason)
-        add_infraction_with_life_check(client, interaction, member, "kick", reason, custom_points=points, send_dm=False)
-        await trigger_avatar_change('kick')
-        await interaction.followup.send(f"✅ **{member.display_name}** expulsé (MP envoyé).", ephemeral=True)
-    except: await interaction.followup.send("❌ Erreur permission.", ephemeral=True)
-
-async def poxel_mute_logic(interaction: discord.Interaction, member: discord.Member, duration_str: str, reason: str, custom_points: int = None):
-    await interaction.response.defer(ephemeral=True)
-    delta = parse_duration(duration_str)
-    if delta.total_seconds() <= 0: return await interaction.followup.send("❌ Durée invalide.", ephemeral=True)
-
-    points = custom_points if custom_points is not None else INFRACTION_POINTS.get("mute", 1)
-    max_lives = get_max_lives(member)
-    current_loss = get_total_infraction_points(member.id)
-    remaining = max(0, max_lives - (current_loss + points))
-
-    await send_private_notification(member, "MUTE (MISE EN SOURDINE)", reason, interaction.user, duration=duration_str, damage=points, remaining_lives=remaining)
-    await asyncio.sleep(2)
-
-    try:
-        await member.timeout(discord.utils.utcnow() + delta, reason=reason)
-        unmute_time = get_adjusted_time() + delta
-        db.setdefault('scheduled_unmutes', []).append({"guild_id": interaction.guild_id, "user_id": member.id, "unmute_at": unmute_time.isoformat()})
+        for member in birthdays_today:
+            await update_user_xp(member.id, reward_xp, is_weekly_xp=True)
+            await check_and_handle_progression(member, channel)
         save_data(db)
-        add_infraction_with_life_check(client, interaction, member, "mute", reason, custom_points=points, send_dm=False)
-        await trigger_avatar_change('mute')
-        await interaction.followup.send(f"✅ **{member.display_name}** rendu muet pour {duration_str} (MP envoyé).", ephemeral=True)
-    except Exception as e: await interaction.followup.send(f"❌ Erreur : {e}", ephemeral=True)
-
-async def poxel_warn_logic(interaction: discord.Interaction, user: discord.User, reason: str, custom_points: int = None):
-    await interaction.response.defer(ephemeral=True)
-    member = interaction.guild.get_member(user.id)
-    max_lives = get_max_lives(member) if member else db['settings'].get("max_lives_default", 9)
-    points = custom_points if custom_points is not None else INFRACTION_POINTS.get("warn", 1)
-    current_loss = get_total_infraction_points(user.id)
-    remaining = max(0, max_lives - (current_loss + points))
-
-    await send_private_notification(user, "AVERTISSEMENT", reason, interaction.user, damage=points, remaining_lives=remaining)
-    await asyncio.sleep(1)
-    
-    add_infraction_with_life_check(client, interaction, user, "warn", reason, custom_points=points, send_dm=False)
-    await trigger_avatar_change('warn')
-    await interaction.followup.send(f"✅ **{user.name}** averti.", ephemeral=True)
-
-async def poxel_unban_logic(interaction: discord.Interaction, user_id: str, reason: str = "Levée de sanction manuelle"):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        # Nécessite que client soit global ou passé. Ici on assume global 'client'
-        if not client: return await interaction.followup.send("Erreur interne (Client not ready).", ephemeral=True)
-        user = await client.fetch_user(int(user_id))
-        
-        embed_dm = discord.Embed(title="✅ DÉBANNISSEMENT (UNBAN)", description=f"Un administrateur du serveur **{interaction.guild.name}** a levé votre bannissement.", color=NEON_GREEN)
-        embed_dm.add_field(name="Raison", value=reason, inline=False)
-        try: await user.send(embed=embed_dm)
-        except: pass
-
-        await interaction.guild.unban(user, reason=f"Unban par admin: {reason}")
-        if user_id in db['infractions']:
-            del db['infractions'][user_id]
-            save_data(db)
-        await trigger_avatar_change('unban') 
-        await interaction.followup.send(f"✅ **{user.name}** a été débanni.", ephemeral=True)
-    except: await interaction.followup.send(f"❌ Utilisateur ID {user_id} introuvable ou erreur.", ephemeral=True)
-
-async def poxel_unmute_logic(interaction: discord.Interaction, user_id: int):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        if not client: return
-        user = await client.fetch_user(user_id)
-        try: await user.send(f"🔊 Votre mute sur **{interaction.guild.name}** a été levé.")
-        except: pass
-
-        member = interaction.guild.get_member(user.id)
-        if member:
-            await member.timeout(None, reason="Unmute manuel par admin.")
-            await interaction.followup.send(f"✅ **{user.name}** unmute.", ephemeral=True)
-        else:
-            await interaction.followup.send(f"⚠️ **{user.name}** notifié (Hors serveur).", ephemeral=True)
-            
-        remaining = [t for t in db.get('scheduled_unmutes', []) if t['user_id'] != user.id]
-        db['scheduled_unmutes'] = remaining
-        save_data(db)
-    except Exception as e: await interaction.followup.send(f"Erreur: {e}", ephemeral=True)
-
-async def poxel_clear_infs_logic(interaction: discord.Interaction, member: discord.Member, reason: str):
-    await interaction.response.defer(ephemeral=True)
-    user_id_str = str(member.id)
-    if user_id_str in db['infractions']:
-        try: await member.send(f"♻️ Votre casier a été purgé sur **{interaction.guild.name}**. Raison: {reason}")
-        except: pass
-        del db['infractions'][user_id_str]
-        save_data(db)
-        await trigger_avatar_change('infraction_clear') 
-        await interaction.followup.send(f"✅ Casier de **{member.display_name}** purgé.", ephemeral=True)
-    else:
-        await interaction.followup.send(f"**{member.display_name}** a déjà un casier vierge.", ephemeral=True)
+    except Exception as e:
+        logger.exception(f"Erreur critique dans check_birthdays: {e}")
 
 
 # ==================================================================================================
-# 11. SYSTÈME DE NOTIFICATIONS (STREAMING & VIDÉOS)
+# 9. SYSTÈME DE NOTIFICATIONS (Robustesse & Scraping)
 # ==================================================================================================
 
-# --- Fonctions YouTube ---
+# --- Fonctions de vérification ---
 
 async def get_youtube_channel_id(youtube_service, identifier: str) -> Optional[str]:
     """Trouve l'ID d'une chaîne YouTube via l'API."""
@@ -1026,6 +989,7 @@ async def get_youtube_channel_id(youtube_service, identifier: str) -> Optional[s
         save_notif_data(notif_db)
     return channel_id
 
+# --- Scraping YouTube ---
 async def check_youtube_scrape(identifier: str, category: str) -> List[Dict]:
     """Vérifie YouTube en analysant la page web (Lives/Vidéos/Shorts)."""
     if identifier.startswith("UC"): base_url = f"https://www.youtube.com/channel/{identifier}"
@@ -1126,7 +1090,6 @@ async def check_youtube(identifier: str, config: Dict, category: str) -> List[Di
         }]
     except Exception: return []
 
-# --- Fonctions Twitch ---
 
 async def get_twitch_bearer_token() -> Optional[str]:
     if not (TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET): return None
@@ -1145,8 +1108,10 @@ async def check_twitch(identifier: str, config: Dict, category: str) -> List[Dic
     if not token: return []
     headers = {"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {token}"}
     
+    # --- CORRECTION TWITCH : Extraction du pseudo depuis l'URL ---
     clean_identifier = identifier.strip().lstrip('@').replace(" ", "")
     if "twitch.tv/" in clean_identifier:
+        # Prend ce qui est après le dernier / et avant un éventuel ?
         clean_identifier = clean_identifier.split("twitch.tv/")[-1].split("/")[0].split("?")[0]
     
     try:
@@ -1168,11 +1133,12 @@ async def check_twitch(identifier: str, config: Dict, category: str) -> List[Dic
                 "is_live": True, "platform": "twitch", "game": s.get('game_name')
             }]
     except Exception as e:
+        # Loguer l'erreur pour debug si besoin, mais ne pas crasher
         logger.error(f"Erreur Twitch pour {clean_identifier}: {e}")
+        pass
     return []
 
-# --- Fonctions Kick ---
-
+# --- KICK (API V1 avec Anti-Cache renforcé) ---
 async def get_kick_token():
     global kick_token, kick_token_expiry
     if kick_token and time.time() < kick_token_expiry: return kick_token
@@ -1191,10 +1157,12 @@ async def check_kick_live(identifier: str) -> List[Dict]:
     token = await get_kick_token()
     if not token: return []
     try:
+        import time
+        # Cache Buster pour forcer les données fraîches
         channel_response = await fetch_url(
             f"https://api.kick.com/public/v1/channels",
             response_type='json',
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json", "Cache-Control": "no-cache"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json", "Cache-Control": "no-cache, no-store, must-revalidate"},
             params={"slug": identifier, "_": str(time.time())}
         )
         if not channel_response or not channel_response.get("data"): return []
@@ -1203,9 +1171,11 @@ async def check_kick_live(identifier: str) -> List[Dict]:
 
         if not stream or not stream.get("is_live"): return []
 
+        # ID de session (priorité à l'ID numérique)
         session_id = str(stream.get("id") or stream.get("start_time"))
         if not session_id: return []
 
+        # Récupération avatar
         avatar = None
         if data.get("broadcaster_user_id"):
             u_resp = await fetch_url(f"https://api.kick.com/public/v1/users", response_type='json',
@@ -1238,13 +1208,11 @@ async def check_kick(identifier: str, config: Dict, category: str) -> List[Dict]
     return await check_kick_live(clean_id)
 
 async def check_tiktok(identifier: str, config: Dict, category: str) -> List[Dict]:
-    # Placeholder pour TikTok (nécessite API externe payante généralement)
     return []
 
 PLATFORM_CHECKERS = {"youtube": check_youtube, "twitch": check_twitch, "kick": check_kick, "tiktok": check_tiktok}
 
 # --- Formatage & Embeds ---
-
 def format_template(template: Optional[str], event: Dict = None) -> str:
     if not template: return ""
     if not event: event = {}
@@ -1258,29 +1226,41 @@ def format_template(template: Optional[str], event: Dict = None) -> str:
 
 def build_embed_for_event(event: Dict, config: Dict) -> discord.Embed:
     platform = event.get('platform', 'unknown')
+    # Couleurs & Icônes par défaut
     colors = {"youtube": YOUTUBE_COLOR, "twitch": TWITCH_COLOR, "kick": KICK_COLOR, "tiktok": TIKTOK_COLOR}
     icons = {"youtube": YOUTUBE_ICON, "twitch": TWITCH_ICON, "kick": KICK_ICON, "tiktok": TIKTOK_ICON}
     
     default_color = colors.get(platform, NEON_BLUE)
     default_icon = icons.get(platform, DEFAULT_ICON)
 
+    # 1. Mode JSON (Prioritaire)
     if config.get("embed_json"):
         try:
             json_str = format_template(config["embed_json"], event)
             data = json.loads(json_str)
+            # Support du format complet {embeds: []} ou simple objet {}
             embed_dict = data["embeds"][0] if "embeds" in data else data
             
+            # Nettoyage pour éviter crashs Discord
             if "author" in embed_dict and "icon_url" in embed_dict["author"]:
                 if not embed_dict["author"]["icon_url"] or not embed_dict["author"]["icon_url"].startswith("http"):
                     del embed_dict["author"]["icon_url"]
-            
+            if "thumbnail" in embed_dict and "url" in embed_dict["thumbnail"]:
+                if not embed_dict["thumbnail"]["url"] or not embed_dict["thumbnail"]["url"].startswith("http"):
+                    del embed_dict["thumbnail"]
+
             embed = discord.Embed.from_dict(embed_dict)
+            # On assure l'URL minimale
             embed.url = event.get("url", "")
             if not embed.footer or not embed.footer.text:
                 embed.set_footer(text=platform.capitalize())
+            
+            # NOTE: EN MODE JSON, ON NE FORCE PAS LE LOGO (Thumbnail).
             return embed
-        except Exception: pass
+        except Exception as e:
+            logger.error(f"Erreur JSON Embed: {e}. Passage en mode simple.")
 
+    # 2. Mode Simple (Fallback)
     embed = discord.Embed(
         title=event.get("title", "Live"),
         url=event.get("url", ""),
@@ -1288,22 +1268,29 @@ def build_embed_for_event(event: Dict, config: Dict) -> discord.Embed:
         color=default_color
     )
     
+    # Auteur
     avatar = event.get('creator_avatar')
     if avatar and avatar.startswith("http"):
         embed.set_author(name=event.get("creator", "Streamer"), icon_url=avatar)
     else:
         embed.set_author(name=event.get("creator", "Streamer"))
 
+    # Image principale
     if event.get("thumbnail"): embed.set_image(url=event.get("thumbnail"))
+    
+    # Champs additionnels
     if event.get("is_live") and event.get("game"):
         embed.add_field(name="Jeu", value=event.get("game"), inline=False)
     
+    # Timestamp
     if event.get("timestamp"):
         try: embed.timestamp = datetime.datetime.fromisoformat(event.get("timestamp").replace("Z", "+00:00"))
         except: embed.timestamp = get_adjusted_time()
 
     embed.set_footer(text=platform.capitalize())
+    # EN MODE SIMPLE, ON AJOUTE LE LOGO EN HAUT À DROITE
     if default_icon: embed.set_thumbnail(url=default_icon)
+    
     return embed
 
 async def send_notification(guild: discord.Guild, source_config: Dict, event: Dict):
@@ -1324,6 +1311,8 @@ async def send_notification(guild: discord.Guild, source_config: Dict, event: Di
     except Exception as e:
         logger.error(f"Erreur envoi notif: {e}")
 
+# --- Tâches de fond ---
+
 async def process_single_source(guild: discord.Guild, source_config: Dict):
     try:
         profile_name = source_config.get("name", "Inconnu")
@@ -1339,16 +1328,21 @@ async def process_single_source(guild: discord.Guild, source_config: Dict):
 
         events = await checker(identifier, source_config.get("config", {}), category)
 
+        # --- GESTION RELANCE LIVE ---
         if not events:
+            # Si on avait un ID en mémoire et qu'on ne détecte plus rien -> Le live a coupé.
+            # On efface IMMÉDIATEMENT la mémoire pour que la prochaine détection (relance) soit vue comme nouvelle.
             if last_id is not None:
                 logger.info(f"[{platform}] {profile_name} est HORS LIGNE. Reset mémoire.")
                 notif_db.setdefault("last_seen", {}).pop(key, None)
                 save_notif_data(notif_db)
             return
 
+        # Si on a un event
         new_event = events[0]
         new_id = str(new_event["id"])
 
+        # Si l'ID a changé OU si on n'avait pas d'ID (première détection ou après reset)
         if str(last_id) != new_id:
             logger.info(f"[{platform}] Nouveau live/vidéo détecté pour {profile_name} (ID: {new_id})")
             await send_notification(guild, source_config, new_event)
@@ -1359,92 +1353,182 @@ async def process_single_source(guild: discord.Guild, source_config: Dict):
         logger.error(f"Erreur process source {source_config.get('name')}: {e}")
 
 @tasks.loop(seconds=30)
-async def check_other_platforms_loop(client_ref: discord.Client):
-    await client_ref.wait_until_ready()
-    tasks_list = []
-    for gid, gconf in notif_db.get("servers", {}).items():
-        guild = client_ref.get_guild(int(gid))
-        if not guild: continue
-        for src in gconf.get("sources", []):
-            if src["platform"] != "youtube":
-                tasks_list.append(process_single_source(guild, src))
-    
-    if tasks_list: await asyncio.gather(*tasks_list, return_exceptions=True)
+async def check_other_platforms_loop():
+    # Boucle Rapide (Twitch, Kick, TikTok)
+    try:
+        await client.wait_until_ready()
+        # Log Heartbeat toutes les 10 itérations (environ 5 min) pour ne pas spammer, mais confirmer la vie
+        # if int(datetime.datetime.now().timestamp()) % 300 < 35: 
+        #    logger.info("Heartbeat: Vérification rapide active.")
+
+        tasks_list = []
+        for gid, gconf in notif_db.get("servers", {}).items():
+            guild = client.get_guild(int(gid))
+            if not guild: continue
+            for src in gconf.get("sources", []):
+                if src["platform"] != "youtube":
+                    tasks_list.append(process_single_source(guild, src))
+        
+        if tasks_list:
+            await asyncio.gather(*tasks_list, return_exceptions=True)
+            
+    except Exception as e:
+        logger.exception(f"Crash dans check_other_platforms_loop: {e}")
 
 @tasks.loop(minutes=1)
-async def check_youtube_loop(client_ref: discord.Client):
-    await client_ref.wait_until_ready()
-    current_hm = get_adjusted_time().astimezone(USER_TIMEZONE).strftime('%H:%M')
-    targets = [f"{h:02d}:00" for h in range(24)] + [f"{h:02d}:{m:02d}" for h in [12,18,20] for m in [1,2,3,4,5,10,15,20]]
-    if current_hm not in set(targets): return
+async def check_youtube_loop():
+    # Boucle Lente (YouTube - API & Scraping)
+    try:
+        await client.wait_until_ready()
+        # Filtrage horaire pour API YouTube (Quota) mais Scraping peut être plus fréquent si désiré
+        # Ici on garde la logique "minutes=1" + filtre horaire pour l'instant
+        
+        current_hm = get_adjusted_time().astimezone(USER_TIMEZONE).strftime('%H:%M')
+        # Horaires cibles
+        targets = [f"{h:02d}:00" for h in range(24)] + [f"{h:02d}:{m:02d}" for h in [12,18,20] for m in [1,2,3,4,5,10,15,20]]
+        if current_hm not in set(targets): return
 
-    tasks_list = []
-    for gid, gconf in notif_db.get("servers", {}).items():
-        guild = client_ref.get_guild(int(gid))
-        if not guild: continue
-        for src in gconf.get("sources", []):
-            if src["platform"] == "youtube":
-                tasks_list.append(process_single_source(guild, src))
+        tasks_list = []
+        for gid, gconf in notif_db.get("servers", {}).items():
+            guild = client.get_guild(int(gid))
+            if not guild: continue
+            for src in gconf.get("sources", []):
+                if src["platform"] == "youtube":
+                    tasks_list.append(process_single_source(guild, src))
+        
+        if tasks_list:
+            await asyncio.gather(*tasks_list, return_exceptions=True)
+        save_notif_data(notif_db) # Sauvegarde périodique globale
+        
+    except Exception as e:
+        logger.exception(f"Crash dans check_youtube_loop: {e}")
+
+
+# ==================================================================================================
+# 10. SYSTÈME DE JEUX GRATUITS (Refonte Visuelle "FreeStuff Style" + Traduction + Regroupement)
+# ==================================================================================================
+
+async def translate_to_french(text: str) -> str:
+    """Traduit un texte en français via Google Translate (Deep Translator)."""
+    if not text or not TRANSLATOR_AVAILABLE:
+        return text
     
-    if tasks_list: await asyncio.gather(*tasks_list, return_exceptions=True)
-    save_notif_data(notif_db)
-
-
-# ==================================================================================================
-# 12. SYSTÈME DE JEUX GRATUITS (EPIC, STEAM, GOG...)
-# ==================================================================================================
+    try:
+        loop = asyncio.get_event_loop()
+        # Exécuter la traduction (qui est bloquante) dans un thread séparé
+        translated = await loop.run_in_executor(
+            None, 
+            lambda: GoogleTranslator(source='auto', target='fr').translate(text)
+        )
+        return translated if translated else text
+    except Exception as e:
+        logger.warning(f"Erreur traduction: {e}")
+        return text
 
 async def create_free_game_embed(game_data: Dict) -> discord.Embed:
-    """Crée un embed pour un jeu gratuit."""
+    """Crée un embed Discord pour un jeu gratuit (Style FreeStuff + Traduction)."""
+
+    # --- 1. Détection de la plateforme et du Logo ---
     platforms_str = game_data.get('platforms', '').lower()
     
+    # Dictionnaire des logos et couleurs
     platform_style = {
-        "epic": {"logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Epic_Games_logo.svg/1200px-Epic_Games_logo.svg.png", "color": 0x333333, "name": "Epic Games"},
-        "steam": {"logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Steam_icon_logo.svg/1024px-Steam_icon_logo.svg.png", "color": 0x1b2838, "name": "Steam"},
-        "gog": {"logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b5/GOG.com_logo.svg/1024px-GOG.com_logo.svg.png", "color": 0x86328A, "name": "GOG"},
-        "ubisoft": {"logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/78/Ubisoft_logo.svg/200px-Ubisoft_logo.svg.png", "color": 0x0091BD, "name": "Ubisoft"},
-        "itch": {"logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/79/Itch.io_logo.svg/1200px-Itch.io_logo.svg.png", "color": 0xFA5C5C, "name": "Itch.io"}
+        "epic": {
+            "logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/31/Epic_Games_logo.svg/1200px-Epic_Games_logo.svg.png",
+            "color": 0x333333,
+            "name": "Epic Games"
+        },
+        "steam": {
+            "logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Steam_icon_logo.svg/1024px-Steam_icon_logo.svg.png",
+            "color": 0x1b2838,
+            "name": "Steam"
+        },
+        "gog": {
+            "logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b5/GOG.com_logo.svg/1024px-GOG.com_logo.svg.png",
+            "color": 0x86328A,
+            "name": "GOG"
+        },
+        "ubisoft": {
+            "logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/78/Ubisoft_logo.svg/200px-Ubisoft_logo.svg.png",
+            "color": 0x0091BD,
+            "name": "Ubisoft"
+        },
+        "itch": {
+            "logo": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/79/Itch.io_logo.svg/1200px-Itch.io_logo.svg.png",
+            "color": 0xFA5C5C,
+            "name": "Itch.io"
+        }
     }
 
     current_style = {"logo": DEFAULT_ICON, "color": FREE_GAMES_COLOR, "name": "Autre"}
+    
     if "epic" in platforms_str: current_style = platform_style["epic"]
     elif "steam" in platforms_str: current_style = platform_style["steam"]
     elif "gog" in platforms_str: current_style = platform_style["gog"]
     elif "ubisoft" in platforms_str or "uplay" in platforms_str: current_style = platform_style["ubisoft"]
     elif "itch" in platforms_str: current_style = platform_style["itch"]
 
+    # --- 2. Construction de l'Embed ---
     embed = discord.Embed(color=current_style["color"])
     embed.title = game_data.get('title', 'Jeu Gratuit !')
     url = game_data.get('open_giveaway_url') or game_data.get('gamerpower_url')
     embed.url = url
 
-    worth = game_data.get('worth', '??')
-    description = f"~~{worth}~~ **Gratuit**\n*Vite ! Récupère-le avant qu'il ne soit trop tard !* 🏃\n\n"
+    # --- 3. Description Formatée ---
+    worth = game_data.get('worth', 'N/A')
+    if worth == "N/A": worth = "??"
+    
+    end_date_str = game_data.get('end_date')
+    date_text = ""
+    if end_date_str and end_date_str != 'N/A':
+        try:
+            date_part = end_date_str.split(" ")[0]
+            y, m, d = date_part.split("-")
+            date_clean = f"{d}/{m}/{y}"
+            date_text = f" jusqu'au {date_clean}"
+        except:
+            date_text = ""
+
+    description = f"~~{worth}~~ **Gratuit**{date_text}\n"
+    description += "*Vite ! Récupère-le avant qu'il ne soit trop tard !* 🏃\n\n"
     
     raw_desc = game_data.get('description', '')
-    if "Instructions:" in raw_desc: raw_desc = raw_desc.split("Instructions:")[0].strip()
+    if "Instructions:" in raw_desc:
+        raw_desc = raw_desc.split("Instructions:")[0].strip()
+    
     french_desc = await translate_to_french(raw_desc)
-    description += f"{french_desc}\n\n"
-    description += f"[**Ouvrir dans le navigateur ↗**]({url})"
+    if french_desc:
+        description += f"{french_desc}\n\n"
+
+    description += f"[**Ouvrir dans le navigateur ↗**]({url})\n"
+    description += f"[**Ouvrir dans le client {current_style['name']} ↗**]({url})"
 
     embed.description = description
-    embed.set_thumbnail(url=current_style["logo"])
-    if game_data.get('image'): embed.set_image(url=game_data['image'])
+    embed.set_thumbnail(url=current_style["logo"]) # Logo Plateforme en haut à droite
+    if game_data.get('image'):
+        embed.set_image(url=game_data['image'])
+
     embed.set_footer(text=f"via GamerPower • {current_style['name']}")
     embed.timestamp = get_adjusted_time()
+
     return embed
 
 @tasks.loop(hours=4)
-async def check_free_games_task(client_ref: discord.Client):
-    await client_ref.wait_until_ready()
+async def check_free_games_task():
+    """Tâche de fond pour vérifier et annoncer les nouveaux jeux gratuits."""
+    await client.wait_until_ready()
+    logger.info("Vérification des jeux gratuits...")
+
     settings = db["settings"].get("free_games_settings", {})
     channel_id = settings.get("channel_id")
     if not channel_id: return
 
-    channel = client_ref.get_channel(channel_id)
+    channel = client.get_channel(channel_id)
     if not channel: return
 
-    games = await fetch_url("https://www.gamerpower.com/api/giveaways?platform=pc", response_type='json')
+    api_url = "https://www.gamerpower.com/api/giveaways?platform=pc"
+    games = await fetch_url(api_url, response_type='json')
+
     if not games or not isinstance(games, list): return
 
     posted_deals = set(settings.get("posted_deals", []))
@@ -1454,47 +1538,174 @@ async def check_free_games_task(client_ref: discord.Client):
 
     for game in games:
         game_id = game.get('id')
-        if game_id and game_id not in posted_deals and game.get('type') == 'Game':
+        if game_id and game_id not in posted_deals and game.get('type', 'N/A') == 'Game':
+            logger.info(f"Nouveau jeu gratuit trouvé: {game.get('title')} (ID: {game_id})")
             try:
                 embed = await create_free_game_embed(game)
                 embeds_to_send.append(embed)
                 new_ids.append(game_id)
-            except: pass
+            except Exception as e:
+                logger.error(f"Erreur création embed jeu: {e}")
 
     if embeds_to_send:
-        for i, chunk in enumerate([embeds_to_send[i:i + 10] for i in range(0, len(embeds_to_send), 10)]):
-            msg = "@everyone 🚨 **ALERTE JEU GRATUIT !** 🚨" if i == 0 else None
-            try: await channel.send(content=msg, embeds=chunk)
-            except: pass
-            await asyncio.sleep(1.5)
-        
-        deals_to_save.extend(new_ids)
-        db["settings"]["free_games_settings"]["posted_deals"] = deals_to_save[-300:]
-        save_data(db)
+        try:
+            chunk_size = 10
+            chunks = [embeds_to_send[i:i + chunk_size] for i in range(0, len(embeds_to_send), chunk_size)]
+            for i, chunk in enumerate(chunks):
+                message_content = f"@everyone 🚨 **ALERTE JEU GRATUIT !** 🚨\nUn ou plusieurs nouveaux cadeaux sont disponibles ! 🎁🔥" if i == 0 else None
+                await channel.send(content=message_content, embeds=chunk)
+                await asyncio.sleep(1.5)
+            
+            deals_to_save.extend(new_ids)
+            db["settings"]["free_games_settings"]["posted_deals"] = deals_to_save[-300:]
+            save_data(db)
+        except Exception as e:
+            logger.error(f"Erreur envoi jeux gratuits: {e}")
+
 
 # ==================================================================================================
-# 13. CINÉ POXEL (FILMS & SÉRIES)
+# 10.5. MODULE CINÉ POXEL (Refonte Totale: Multi-API, Catégories, Épisodes)
 # ==================================================================================================
 
+# --- Logos & Constantes ---
+TV_TIME_LOGO = "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5a/TV_Time_logo.svg/1200px-TV_Time_logo.svg.png"
+CINEMA_POPCORN_LOGO = "https://cdn-icons-png.flaticon.com/512/2809/2809590.png"
+
+# Liste complète des plateformes avec logos vérifiés et alias
 STREAMING_PLATFORMS_EXT = {
-    "netflix": {"color": NETFLIX_COLOR, "icon": NETFLIX_ICON, "name": "Netflix", "aliases": ["netflix"]},
-    "disney": {"color": DISNEY_COLOR, "icon": DISNEY_ICON, "name": "Disney+", "aliases": ["disney+", "disney plus"]},
-    "prime": {"color": PRIME_COLOR, "icon": PRIME_ICON, "name": "Prime Video", "aliases": ["amazon prime video", "prime video"]},
-    "apple": {"color": 0xA3AAAE, "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/Apple_TV_Plus_Logo.svg/1200px-Apple_TV_Plus_Logo.svg.png", "name": "Apple TV+", "aliases": ["apple tv+"]},
-    "crunchyroll": {"color": 0xF47521, "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/08/Crunchyroll_Logo.png/1200px-Crunchyroll_Logo.png", "name": "Crunchyroll", "aliases": ["crunchyroll"]},
-    "adn": {"color": 0x0090D9, "icon": "https://upload.wikimedia.org/wikipedia/fr/thumb/3/3f/Logo_ADN_2016.svg/1200px-Logo_ADN_2016.svg.png", "name": "ADN", "aliases": ["adn"]},
-    "cinema": {"color": CINEMA_COLOR, "icon": CINEMA_ICON, "name": "Cinéma", "aliases": ["cinema"]}
+    "netflix": {
+        "color": 0xE50914, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/08/Netflix_2015_logo.svg/1200px-Netflix_2015_logo.svg.png", 
+        "name": "Netflix",
+        "aliases": ["netflix"]
+    },
+    "disney": {
+        "color": 0x113CCF, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Disney%2B_logo.svg/1200px-Disney%2B_logo.svg.png", 
+        "name": "Disney+",
+        "aliases": ["disney+", "disney plus"]
+    },
+    "prime": {
+        "color": 0x00A8E1, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/f/f1/Prime_Video.png/1200px-Prime_Video.png", 
+        "name": "Prime Video",
+        "aliases": ["amazon prime video", "prime video", "amazon video"]
+    },
+    "apple": {
+        "color": 0xA3AAAE, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/Apple_TV_Plus_Logo.svg/1200px-Apple_TV_Plus_Logo.svg.png", 
+        "name": "Apple TV+",
+        "aliases": ["apple tv+", "apple tv plus", "apple tv"]
+    },
+    "canal": {
+        "color": 0x000000, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b1/Canal%2B_new_logo.svg/1200px-Canal%2B_new_logo.svg.png", 
+        "name": "Canal+",
+        "aliases": ["canal+", "canal plus"]
+    },
+    "crunchyroll": {
+        "color": 0xF47521, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/08/Crunchyroll_Logo.png/1200px-Crunchyroll_Logo.png", 
+        "name": "Crunchyroll",
+        "aliases": ["crunchyroll"]
+    },
+    "adn": {
+        "color": 0x0090D9, 
+        "icon": "https://upload.wikimedia.org/wikipedia/fr/thumb/3/3f/Logo_ADN_2016.svg/1200px-Logo_ADN_2016.svg.png", 
+        "name": "ADN",
+        "aliases": ["adn", "animation digital network"]
+    },
+    "paramount": {
+        "color": 0x0064FF, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Paramount_Plus.svg/1200px-Paramount_Plus.svg.png", 
+        "name": "Paramount+",
+        "aliases": ["paramount+", "paramount plus"]
+    },
+    "max": {
+        "color": 0x002BE7, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/ce/Max_logo.svg/1200px-Max_logo.svg.png", 
+        "name": "Max (HBO)",
+        "aliases": ["max", "hbo max", "hbo"]
+    },
+    "hulu": {
+        "color": 0x1CE783, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Hulu_Logo.svg/1200px-Hulu_Logo.svg.png", 
+        "name": "Hulu",
+        "aliases": ["hulu"]
+    },
+    "peacock": {
+        "color": 0x000000, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/NBCUniversal_Peacock_Logo.svg/1200px-NBCUniversal_Peacock_Logo.svg.png", 
+        "name": "Peacock",
+        "aliases": ["peacock", "peacock premium"]
+    },
+    "tf1": {
+        "color": 0x0099FF, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/59/TF1%2B_logo.svg/1200px-TF1%2B_logo.svg.png", 
+        "name": "TF1+",
+        "aliases": ["tf1+", "tf1"]
+    },
+    "m6": {
+        "color": 0x555555, 
+        "icon": "https://upload.wikimedia.org/wikipedia/fr/thumb/e/e0/M6%2B_logo.svg/1200px-M6%2B_logo.svg.png", 
+        "name": "M6+",
+        "aliases": ["m6+", "m6"]
+    },
+    "ocs": {
+        "color": 0xFFA500, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/6d/OCS_logo_2019.svg/1200px-OCS_logo_2019.svg.png", 
+        "name": "OCS",
+        "aliases": ["ocs"]
+    },
+    "rakuten": {
+        "color": 0xBF0000, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e9/Rakuten_TV_logo.svg/1200px-Rakuten_TV_logo.svg.png", 
+        "name": "Rakuten TV",
+        "aliases": ["rakuten", "rakuten tv"]
+    },
+    "molotov": {
+        "color": 0x2D2D2D, 
+        "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/86/Molotov_Logo.svg/1200px-Molotov_Logo.svg.png", 
+        "name": "Molotov TV",
+        "aliases": ["molotov", "molotov tv"]
+    },
+    "cinema": {
+        "color": CINEMA_COLOR, 
+        "icon": CINEMA_POPCORN_LOGO, 
+        "name": "Cinéma",
+        "aliases": ["cinema", "theatre"]
+    }
 }
 
-BIG_HIT_KEYWORDS = ["avatar", "avengers", "star wars", "one piece", "stranger things", "arcane", "gta", "demon slayer", "jujutsu kaisen", "dragon ball"]
+# Mots-clés pour les "Gros Événements" (Style spécial)
+BIG_HIT_KEYWORDS = [
+    "avatar", "avengers", "star wars", "one piece", "stranger things", "arcane", 
+    "last of us", "house of the dragon", "rings of power", "dune", "spider-man", 
+    "gta", "invincible", "demon slayer", "kimetsu no yaiba", "attack on titan", "shingeki no kyojin", "jujutsu kaisen",
+    "solo leveling", "dragon ball", "one punch man", "my hero academia", "bleach"
+]
 
-def normalize_platform_name(api_name: str) -> Tuple[str, Dict]:
-    clean = api_name.lower().strip()
-    for _, data in STREAMING_PLATFORMS_EXT.items():
-        if any(alias in clean for alias in data["aliases"]): return data["name"], data
-    return api_name, {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON, "name": api_name}
+# --- Helpers de Classification & API ---
 
-async def get_watch_providers(media_type: str, tmdb_id: int, category: str = None) -> Tuple[str, Dict, str]:
+def normalize_platform_name(api_provider_name: str) -> Tuple[str, Dict]:
+    """Convertit le nom API en nom propre et retourne le style."""
+    clean_name = api_provider_name.lower().strip()
+    
+    # 1. Recherche dans la liste connue
+    for key, data in STREAMING_PLATFORMS_EXT.items():
+        for alias in data["aliases"]:
+            if alias in clean_name:
+                return data["name"], data
+    
+    # 2. Fallback générique
+    return api_provider_name, {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON, "name": api_provider_name}
+
+async def get_watch_providers(media_type: str, tmdb_id: int, content_category: str = None) -> Tuple[str, Dict, str]:
+    """
+    Récupère les plateformes de streaming via TMDB.
+    Gère la priorité pour afficher la plateforme 'Up to date' en logo.
+    Retourne (NomPrincipal, StylePrincipal, TexteAutresPlateformes).
+    """
     if not TMDB_API_KEY: return "Inconnu", {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}, ""
     url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/watch/providers?api_key={TMDB_API_KEY}"
     data = await fetch_url(url, response_type='json')
@@ -1502,753 +1713,2341 @@ async def get_watch_providers(media_type: str, tmdb_id: int, category: str = Non
     if not data or "results" not in data or "FR" not in data["results"]:
         return "Inconnu", {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}, ""
     
-    fr = data["results"]["FR"]
-    flatrate = fr.get("flatrate", []) or fr.get("buy", []) or fr.get("rent", [])
-    if not flatrate: return "Inconnu", {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}, ""
-
-    providers = {}
-    for p in flatrate:
-        norm_name, norm_style = normalize_platform_name(p["provider_name"])
-        if norm_name not in providers: providers[norm_name] = norm_style
-
-    if not providers: return "Inconnu", {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}, ""
+    fr_providers = data["results"]["FR"]
+    # On regarde principalement le "flatrate" (Abonnement)
+    flatrate = fr_providers.get("flatrate", [])
     
-    prov_list = list(providers.items())
-    primary_name, primary_style = prov_list[0]
+    if not flatrate:
+        # Fallback sur "buy" ou "rent" si pas de flatrate (optionnel, mais utile)
+        flatrate = fr_providers.get("buy", []) or fr_providers.get("rent", [])
+        if not flatrate:
+            return "Inconnu", {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}, ""
 
-    # Priorité Anime
-    if category == 'anime':
-        for name, style in prov_list:
-            if name in ["Crunchyroll", "ADN"]:
-                primary_name, primary_style = name, style
-                break
-
-    others = ", ".join([n for n, _ in prov_list if n != primary_name])
-    return primary_name, primary_style, others
-
-def classify_content(item: Dict, media_type: str) -> str:
-    genre_ids = item.get('genre_ids', [])
-    country = item.get('origin_country', [])
-    lang = item.get('original_language', '')
-    is_anim = 16 in genre_ids
-    is_jp = 'JP' in country or lang == 'ja'
+    # Liste de tous les providers trouvés (Nom, Style) - SANS DOUBLONS
+    found_providers_dict = {} # Use dict to remove duplicates by normalized name
     
-    if is_anim: return 'anime' if is_jp else 'cartoon'
-    return 'movie' if media_type == 'movie' else 'series'
+    for provider in flatrate:
+        p_name = provider["provider_name"]
+        norm_name, norm_style = normalize_platform_name(p_name)
+        if norm_name not in found_providers_dict:
+            found_providers_dict[norm_name] = norm_style
 
-async def create_cine_pixel_embed(item_id: int, media_type: str, category: str, is_episode: bool = False, episode_data: Optional[Dict] = None) -> discord.Embed:
-    url = f"https://api.themoviedb.org/3/{media_type}/{item_id}?api_key={TMDB_API_KEY}&language=fr-FR"
-    details = await fetch_url(url, response_type='json')
+    if not found_providers_dict:
+        return "Inconnu", {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}, ""
+
+    # Conversion en liste de tuples pour le tri
+    found_providers = list(found_providers_dict.items())
+
+    # --- LOGIQUE DE PRIORITÉ INTELLIGENTE (Fix One Punch Man & co) ---
+    # L'objectif est de mettre en avant la plateforme qui a la SAISON EN COURS (Simulcast)
+    
+    primary_name, primary_style = found_providers[0] # Par défaut le premier
+    
+    if content_category == 'anime':
+        # Pour les animés : Crunchyroll et ADN sont prioritaires sur Netflix/Prime
+        # car ils ont souvent la saison "en cours" alors que Netflix a les anciennes.
+        
+        # On cherche si Crunchyroll est présent
+        crunchy = next((p for p in found_providers if p[0] == "Crunchyroll"), None)
+        adn = next((p for p in found_providers if p[0] == "ADN"), None)
+        
+        if crunchy:
+            primary_name, primary_style = crunchy
+        elif adn:
+            primary_name, primary_style = adn
+        
+    elif content_category == 'series':
+        # Priorité aux créateurs de contenu originaux
+        # HBO -> Max
+        max_hbo = next((p for p in found_providers if p[0] == "Max (HBO)"), None)
+        if max_hbo: 
+            primary_name, primary_style = max_hbo
+        else:
+            # Disney+ > Netflix (car Disney garde souvent ses exclus)
+            disney = next((p for p in found_providers if p[0] == "Disney+"), None)
+            if disney:
+                primary_name, primary_style = disney
+
+    # Construction du texte pour les autres plateformes
+    other_names = [name for name, style in found_providers if name != primary_name]
+    other_text = ""
+    if other_names:
+        other_text = ", ".join(other_names)
+
+    return primary_name, primary_style, other_text
+
+def classify_content(item_data: Dict, media_type: str) -> str:
+    """
+    Classe le contenu dans : 'anime', 'cartoon', 'series', 'movie'.
+    """
+    if media_type == 'movie':
+        genre_ids = item_data.get('genre_ids', [])
+        origin_country = item_data.get('origin_country', [])
+        original_lang = item_data.get('original_language', '')
+        
+        # Cas film d'animation
+        if 16 in genre_ids: # 16 = Animation
+            if 'JP' in origin_country or original_lang == 'ja':
+                return 'anime'
+            return 'cartoon'
+        return 'movie'
+    
+    else: # TV Show
+        genre_ids = item_data.get('genre_ids', [])
+        origin_country = item_data.get('origin_country', [])
+        original_lang = item_data.get('original_language', '')
+        
+        if 16 in genre_ids: # Animation
+            if 'JP' in origin_country or original_lang == 'ja':
+                return 'anime'
+            return 'cartoon'
+        return 'series'
+
+def is_big_event(item_data: Dict) -> bool:
+    """Détermine si c'est un gros événement (Mots-clés + Popularité)."""
+    title = item_data.get('title', item_data.get('name', '')).lower()
+    if any(k in title for k in BIG_HIT_KEYWORDS):
+        return True
+    # Popularité extrême
+    if item_data.get('vote_count', 0) > 3000 and item_data.get('vote_average', 0) > 8.0:
+        return True
+    return False
+
+# --- Génération d'Embed (Le Cœur Visuel) ---
+
+async def create_cine_pixel_embed(item_id: int, media_type: str, category: str, is_episode: bool = False, season_data: Optional[Dict] = None, episode_data: Optional[Dict] = None) -> discord.Embed:
+    """
+    Génère l'embed final avec logos corrigés et suppression des textes inutiles.
+    """
+    # 1. Fetch Détails Complets (en Français)
+    url_details = f"https://api.themoviedb.org/3/{media_type}/{item_id}?api_key={TMDB_API_KEY}&language=fr-FR"
+    details = await fetch_url(url_details, response_type='json')
     if not details: return None
 
-    # Détection Plateforme
-    p_name, p_style, others = "Inconnu", {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}, ""
+    # 2. Identifier la Plateforme
+    platform_name = "Inconnu"
+    platform_style = {"color": DEFAULT_CINE_COLOR, "icon": DEFAULT_ICON}
+    other_platforms = ""
+    
+    # Cas Cinéma (Films récents < 3 mois)
+    is_cinema = False
     if media_type == 'movie':
-        rel = details.get('release_date', '2000-01-01')
+        release_date = details.get('release_date', '2000-01-01')
         try:
-            if (get_adjusted_time().date() - datetime.datetime.strptime(rel, "%Y-%m-%d").date()).days < 90:
-                p_name, p_style = "Cinéma", STREAMING_PLATFORMS_EXT["cinema"]
+            rel_dt = datetime.datetime.strptime(release_date, "%Y-%m-%d").date()
+            if (get_adjusted_time().date() - rel_dt).days < 90:
+                platform_style = STREAMING_PLATFORMS_EXT["cinema"]
+                platform_name = "Cinéma"
+                is_cinema = True
         except: pass
     
-    if p_name == "Inconnu":
+    if not is_cinema:
+        # Récupération intelligente via Watch Providers avec catégorie pour priorité
         p_name, p_style, others = await get_watch_providers(media_type, item_id, category)
+        if p_name != "Inconnu":
+            platform_name = p_name
+            platform_style = p_style
+            other_platforms = others
+        else:
+            platform_name = "Plateforme Inconnue"
 
-    is_big = any(k in details.get('title', details.get('name', '')).lower() for k in BIG_HIT_KEYWORDS) or (details.get('vote_count', 0) > 3000 and details.get('vote_average', 0) > 8.0)
-    
+    # 3. Vérifier "Gros Événement"
+    big_event = is_big_event(details)
+    embed_color = GOLD_COLOR if big_event else platform_style.get("color", DEFAULT_CINE_COLOR)
+
+    # 4. Titres & Textes
     title = details.get('title') if media_type == 'movie' else details.get('name')
+    overview = details.get('overview', '')
+    if not overview: overview = "Aucun synopsis disponible."
+    
+    display_title = title
     if is_episode and episode_data:
-        title += f" — S{episode_data.get('season_number'):02d}E{episode_data.get('episode_number'):02d}"
+        s_num = episode_data.get('season_number')
+        e_num = episode_data.get('episode_number')
+        e_name = episode_data.get('name', '')
+        display_title = f"{title} — S{s_num:02d}E{e_num:02d}"
+        if e_name: display_title += f" : {e_name}"
+    elif media_type != 'movie' and season_data:
+        s_num = season_data.get('season_number')
+        display_title = f"{title} — Saison {s_num}"
 
-    embed = discord.Embed(title=f"{'🌟 ' if is_big else ''}{title}", url=f"https://www.themoviedb.org/{media_type}/{item_id}", color=GOLD_COLOR if is_big else p_style["color"])
-    embed.set_thumbnail(url=p_style["icon"])
+    # 5. Création de l'Embed
+    embed = discord.Embed(title=f"{'🌟 ' if big_event else ''}{display_title}", url=f"https://www.themoviedb.org/{media_type}/{item_id}", color=embed_color)
     
-    desc = f"🎬 **{'Sortie en salle' if p_name == 'Cinéma' else 'Disponible'} sur {p_name} !**\n\n"
-    overview = details.get('overview', 'Synopsis indisponible.')
-    desc += f"{overview[:400]}..." if len(overview) > 400 else overview
-    embed.description = desc
+    # LOGO PLATEFORME PRINCIPALE EN HAUT À DROITE
+    embed.set_thumbnail(url=platform_style["icon"])
 
-    if p_name != "Inconnu":
-        val = f"**{p_name}**" + (f"\n*Aussi sur : {others}*" if others else "")
-        embed.add_field(name="📺 Regarder sur", value=val, inline=False)
-
-    img = details.get('backdrop_path') or details.get('poster_path')
-    if is_episode and episode_data and episode_data.get('still_path'): img = episode_data.get('still_path')
-    if img: embed.set_image(url=f"https://image.tmdb.org/t/p/original{img}")
+    # Description Contextuelle
+    desc_text = ""
     
-    embed.set_footer(text="Poxel Ciné • Données TMDB")
+    if is_episode:
+        desc_text += f"🆕 **Nouvel Épisode !**\nL'épisode vient de sortir sur **{platform_name}**. Foncez le regarder !\n\n"
+    elif media_type != 'movie' and season_data:
+        desc_text += f"🔥 **Nouvelle Saison !**\nLa saison {season_data.get('season_number')} est disponible sur **{platform_name}**.\n\n"
+    else: 
+        verb = "Sortie en salle" if platform_name == "Cinéma" else "Disponible"
+        desc_text += f"🎬 **{verb} sur {platform_name} !**\n\n"
+
+    desc_text += f"{overview[:400]}..." if len(overview) > 400 else overview
+    embed.description = desc_text
+
+    # Champs Infos
+    embed.add_field(name="📅 Date", value=details.get('release_date') or details.get('first_air_date') or "Inconnue", inline=True)
+    embed.add_field(name="⭐ Note", value=f"{details.get('vote_average', 0):.1f}/10", inline=True)
+    
+    # Affichage intelligent des plateformes (NETTOYÉ)
+    if platform_name != "Inconnu":
+        # Juste le nom, sans le texte "(Nouveauté / Saison en cours)" que tu n'aimais pas
+        main_val = f"**{platform_name}**"
+        
+        if other_platforms:
+            main_val += f"\n\n*Également disponible sur :*\n{other_platforms}"
+        
+        embed.add_field(name="📺 Regarder sur", value=main_val, inline=False)
+
+    # Image
+    img_path = details.get('backdrop_path') or details.get('poster_path')
+    if is_episode and episode_data and episode_data.get('still_path'):
+        img_path = episode_data.get('still_path')
+    
+    if img_path:
+        embed.set_image(url=f"https://image.tmdb.org/t/p/original{img_path}")
+
+    # 6. Footer
+    footer_text = "Poxel Ciné • Données TMDB & JustWatch"
+    if category == 'anime': footer_text += " • AniList"
+    
+    embed.set_footer(text=footer_text, icon_url=TV_TIME_LOGO)
+    embed.add_field(name="\u200b", value=f"📱 **Conseil Pro :** Utilisez l'app [TV Time](https://www.tvtime.com/) pour suivre votre progression !", inline=False)
+
     return embed
 
-async def check_updates_for_category(client_ref, category_key: str, media_type: str, **kwargs):
-    channel_id = db["settings"].get("cine_pixel_channels", {}).get(category_key)
+# --- Logique de Boucle & Vérification (Le Moteur) ---
+
+async def check_updates_for_category(category_key: str, media_type: str, is_anime: bool = False, is_cartoon: bool = False):
+    """
+    Vérifie les nouveautés pour une catégorie spécifique.
+    """
+    settings = db["settings"].get("cine_pixel_channels", {})
+    channel_id = settings.get(category_key)
     if not channel_id: return
-    channel = client_ref.get_channel(channel_id)
+
+    channel = client.get_channel(channel_id)
     if not channel: return
 
-    is_news = "news" in category_key
-    url = f"https://api.themoviedb.org/3/{'movie/now_playing' if is_news and media_type == 'movie' else 'tv/on_the_air' if is_news else 'tv/airing_today'}?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
-    
+    # URL TMDB adaptée
+    if "news" in category_key:
+        if media_type == 'movie':
+            url = f"https://api.themoviedb.org/3/movie/now_playing?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
+        else: # TV
+            url = f"https://api.themoviedb.org/3/tv/on_the_air?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
+    else: 
+        url = f"https://api.themoviedb.org/3/tv/airing_today?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
+
     data = await fetch_url(url, response_type='json')
     if not data or "results" not in data: return
 
     history_key = f"history_{category_key}"
     history = db["settings"].setdefault("cine_history", {}).setdefault(history_key, [])
+    
+    embeds_to_send = []
+    new_ids_processed = []
+
     today = get_adjusted_time().date()
-    new_ids = []
 
     for item in data["results"]:
-        cat = classify_content(item, media_type)
-        if kwargs.get('is_anime') and cat != 'anime': continue
-        if kwargs.get('is_cartoon') and cat != 'cartoon': continue
-        if not kwargs.get('is_anime') and not kwargs.get('is_cartoon') and cat == 'anime': continue # Avoid anime in series channel
+        item_id = item["id"]
+        
+        detected_cat = classify_content(item, media_type)
+        
+        should_process = False
+        if is_anime and detected_cat == 'anime': should_process = True
+        elif is_cartoon and detected_cat == 'cartoon': should_process = True
+        elif not is_anime and not is_cartoon and detected_cat == 'series' and media_type == 'tv': should_process = True
+        elif media_type == 'movie' and not is_anime and not is_cartoon: should_process = True
 
-        unique_key = f"{item['id']}_{today}"
+        if not should_process: continue
+
+        unique_key = f"{item_id}_{today}"
         if unique_key in history: continue
 
-        embed = None
         try:
-            if is_news:
-                date_key = 'release_date' if media_type == 'movie' else 'first_air_date'
-                rel_date = item.get(date_key)
-                if rel_date and (today - datetime.datetime.strptime(rel_date, "%Y-%m-%d").date()).days < 7:
-                    embed = await create_cine_pixel_embed(item['id'], media_type, cat)
-            else: # Episodes
-                det = await fetch_url(f"https://api.themoviedb.org/3/tv/{item['id']}?api_key={TMDB_API_KEY}&language=fr-FR", response_type='json')
-                last = det.get('last_episode_to_air')
-                if last and last.get('air_date') == str(today):
-                    embed = await create_cine_pixel_embed(item['id'], media_type, cat, is_episode=True, episode_data=last)
+            embed = None
             
-            if embed:
-                await channel.send(embed=embed)
-                new_ids.append(unique_key)
-                await asyncio.sleep(1.5)
-        except: pass
+            # CAS : SORTIES / NEWS
+            if "news" in category_key:
+                if media_type == 'tv':
+                    first_air = item.get('first_air_date')
+                    # Si sortie récente (cette semaine)
+                    if first_air and (today - datetime.datetime.strptime(first_air, "%Y-%m-%d").date()).days < 7:
+                        embed = await create_cine_pixel_embed(item_id, media_type, detected_cat, is_episode=False)
+                else: # Film
+                    embed = await create_cine_pixel_embed(item_id, media_type, detected_cat, is_episode=False)
 
-    history.extend(new_ids)
-    db["settings"]["cine_history"][history_key] = history[-200:]
-    save_data(db)
+            # CAS : ÉPISODES
+            elif "episodes" in category_key and media_type == 'tv':
+                details_url = f"https://api.themoviedb.org/3/tv/{item_id}?api_key={TMDB_API_KEY}&language=fr-FR"
+                det = await fetch_url(details_url, response_type='json')
+                
+                last_ep = det.get('last_episode_to_air')
+                if last_ep:
+                    ep_date_str = last_ep.get('air_date')
+                    if ep_date_str == str(today): 
+                        embed = await create_cine_pixel_embed(item_id, media_type, detected_cat, is_episode=True, episode_data=last_ep)
+
+            if embed:
+                embeds_to_send.append(embed)
+                new_ids_processed.append(unique_key)
+
+        except Exception as e:
+            logger.error(f"Erreur traitement item {item_id} ({category_key}): {e}")
+
+    if embeds_to_send:
+        for emb in embeds_to_send:
+            try:
+                await channel.send(embed=emb)
+                await asyncio.sleep(1.5)
+            except: pass
+        
+        history.extend(new_ids_processed)
+        db["settings"]["cine_history"][history_key] = history[-200:]
+        save_data(db)
+        logger.info(f"Ciné Poxel ({category_key}): {len(embeds_to_send)} notifs envoyées.")
+
 
 @tasks.loop(hours=4)
-async def check_cine_news_task(client_ref: discord.Client):
-    await client_ref.wait_until_ready()
+async def check_cine_news_task():
+    """Tâche principale qui lance les vérifications pour toutes les catégories."""
+    await client.wait_until_ready()
     if not TMDB_API_KEY: return
     
-    # News
-    await check_updates_for_category(client_ref, 'news_series', 'tv')
-    await check_updates_for_category(client_ref, 'news_anime', 'tv', is_anime=True)
-    await check_updates_for_category(client_ref, 'news_cartoons', 'tv', is_cartoon=True)
-    await check_updates_for_category(client_ref, 'news_movies', 'movie')
-    # Episodes
-    await check_updates_for_category(client_ref, 'episodes_series', 'tv')
-    await check_updates_for_category(client_ref, 'episodes_anime', 'tv', is_anime=True)
-    await check_updates_for_category(client_ref, 'episodes_cartoons', 'tv', is_cartoon=True)
+    logger.info("Ciné Poxel: Lancement du scan complet (4h)...")
+    
+    # 1. NEWS / SORTIES
+    await check_updates_for_category('news_series', 'tv', is_anime=False, is_cartoon=False)
+    await check_updates_for_category('news_anime', 'tv', is_anime=True)
+    await check_updates_for_category('news_cartoons', 'tv', is_cartoon=True)
+    await check_updates_for_category('news_movies', 'movie')
+    
+    # 2. ÉPISODES
+    await check_updates_for_category('episodes_series', 'tv', is_anime=False, is_cartoon=False)
+    await check_updates_for_category('episodes_anime', 'tv', is_anime=True)
+    await check_updates_for_category('episodes_cartoons', 'tv', is_cartoon=True)
+
 
 # ==================================================================================================
-# 14. AUTOMATISATION SOCIALE (ANNIVERSAIRES & TOPWEEK & BACKUP)
+# 11. CLASSE DU CLIENT DISCORD & ÉVÉNEMENTS DE BASE
 # ==================================================================================================
 
-@tasks.loop(time=datetime.time(hour=0, minute=1, tzinfo=SERVER_TIMEZONE))
-async def check_birthdays(client_ref: discord.Client):
-    await client_ref.wait_until_ready()
-    settings = db["settings"].get("birthday_settings", {})
-    channel_id = settings.get("channel_id")
-    if not channel_id: return
-    channel = client_ref.get_channel(channel_id)
-    if not channel: return
+class PoxelBotClient(discord.Client):
+    """Client Discord personnalisé avec CommandTree."""
+    def __init__(self, *, intents: discord.Intents):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self.persistent_views_added = False
 
-    today = get_adjusted_time().strftime("%m-%d")
-    mentions = []
-    for uid, date in db.get("birthdays", {}).items():
-        if date == today:
-            member = channel.guild.get_member(int(uid))
-            if member: mentions.append(member)
+    async def setup_hook(self):
+        """Fonction appelée lors de l'initialisation pour synchroniser les commandes."""
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"Synchronisé {len(synced)} commandes slash.")
+        except Exception as e:
+            logger.exception(f"Échec de la synchronisation des commandes slash : {e}")
 
-    if mentions:
-        txt = ", ".join(m.mention for m in mentions)
-        embed = discord.Embed(title="🎂 Joyeux Anniversaire ! 🎂", description=f"Bon anniversaire à {txt} ! 🎉", color=GOLD_COLOR)
-        embed = apply_embed_styles(embed, "birthday_announce")
-        try: await channel.send(content="@everyone", embed=embed)
-        except: pass
+    async def on_ready(self):
+        """Événement déclenché lorsque le bot est connecté et prêt."""
+        logger.info(f"Connecté en tant que {self.user.name} ({self.user.id})")
+        logger.info(f"Latence API: {round(self.latency * 1000)}ms")
+        logger.info(f"Présent sur {len(self.guilds)} serveur(s).")
         
-        for m in mentions:
-            await update_user_xp(m.id, settings.get("reward_xp", 100))
-            await check_and_handle_progression(m, channel)
+        if PIL_AVAILABLE:
+            download_and_cache_assets()
+
+        if not check_birthdays.is_running(): check_birthdays.start()
+        
+        if not check_youtube_loop.is_running(): check_youtube_loop.start()
+        if not check_other_platforms_loop.is_running(): check_other_platforms_loop.start()
+        
+        if not check_free_games_task.is_running(): check_free_games_task.start()
+        if not check_cine_news_task.is_running(): check_cine_news_task.start()
+
+        if not weekly_xp_reset.is_running(): weekly_xp_reset.start()
+        if not post_weekly_leaderboard.is_running(): post_weekly_leaderboard.start()
+        if not check_avatar_revert.is_running(): check_avatar_revert.start()
+        if not backup_xp_data.is_running(): backup_xp_data.start()
+
+client = PoxelBotClient(intents=intents)
+
+@client.event
+async def on_message(message: discord.Message):
+    """Gère les messages pour le gain d'XP et l'écoute des autres bots."""
+    if not message.guild or message.author.bot or message.webhook_id:
+        return
+
+    author = message.author
+    user_data = get_user_xp_data(author.id)
+    now = get_adjusted_time()
+    settings = db.get("settings", {})
+
+    xp_config = settings.get("level_up_rewards", {})
+    cooldown_minutes = xp_config.get("xp_gain_cooldown_minutes", 1)
+    can_gain_xp = True
+
+    last_ts_str = user_data.get("last_message_timestamp")
+    if last_ts_str:
+        try:
+            last_ts = datetime.datetime.fromisoformat(last_ts_str).replace(tzinfo=SERVER_TIMEZONE)
+            if now < last_ts + datetime.timedelta(minutes=cooldown_minutes):
+                can_gain_xp = False
+        except ValueError:
+            user_data["last_message_timestamp"] = now.isoformat()
+
+    if can_gain_xp:
+        min_xp = xp_config.get("xp_gain_per_message", {}).get("min", 15)
+        max_xp = xp_config.get("xp_gain_per_message", {}).get("max", 25)
+        xp_gain = random.randint(min_xp, max_xp)
+
+        user_data["last_message_timestamp"] = now.isoformat()
+        await update_user_xp(author.id, xp_gain, is_weekly_xp=True)
+        await check_and_handle_progression(author, message.channel)
         save_data(db)
 
-@tasks.loop(time=datetime.time(hour=0, minute=0, second=5, tzinfo=SERVER_TIMEZONE))
-async def weekly_xp_reset(client_ref: discord.Client):
-    await client_ref.wait_until_ready()
-    if get_adjusted_time().weekday() == 0: # Lundi
-        for _, data in db.get("users", {}).items(): data["weekly_xp"] = 0
+
+    # --- Écoute des Bots Mod/Event (Ajustement XP) ---
+    mod_listener_config = settings.get("mod_listener_settings", {})
+    if mod_listener_config.get("enabled", True):
+        mod_channel_id = mod_listener_config.get("mod_bot_channel_id")
+        event_channel_id = mod_listener_config.get("event_bot_channel_id")
+        xp_penalties = mod_listener_config.get("xp_penalty", {})
+        xp_rewards = mod_listener_config.get("xp_reward", {})
+
+        if message.author.bot and message.channel.id in [mod_channel_id, event_channel_id] and message.embeds:
+            embed = message.embeds[0]
+            target_member: Optional[discord.Member] = None
+            xp_to_change: int = 0
+            reason: str = ""
+
+            if message.channel.id == mod_channel_id and (embed.description or embed.title):
+                member_mention_match = re.search(r'<@!?(\d+)>', embed.description or "")
+                target_user_id = None
+                
+                if member_mention_match:
+                    target_user_id = int(member_mention_match.group(1))
+                else:
+                    author_text = embed.author.name if embed.author else ""
+                    footer_text = embed.footer.text if embed.footer else ""
+                    id_match = re.search(r'\((\d{17,19})\)', author_text) or re.search(r'ID: (\d{17,19})', footer_text)
+                    if id_match:
+                        target_user_id = int(id_match.group(1))
+                    else:
+                        name_match = re.search(r'^(.*?)\s*#\d{4}', author_text) 
+                        if name_match:
+                             target_member_by_name = discord.utils.get(message.guild.members, name=name_match.group(1))
+                             if target_member_by_name:
+                                target_user_id = target_member_by_name.id
+                                
+                if target_user_id:
+                    target_member = message.guild.get_member(target_user_id)
+
+                if target_member and embed.title:
+                    title_lower = embed.title.lower()
+                    for sanction, xp_penalty in xp_penalties.items():
+                        if sanction in title_lower:
+                            xp_to_change = xp_penalty
+                            reason = f"Sanction '{sanction}' détectée (Bot Mod)"
+                            break
+
+            elif message.channel.id == event_channel_id:
+                if embed.description and "félicitations au vainqueur" in embed.description.lower():
+                    winner_mention = re.search(r'<@!?(\d+)>', embed.description)
+                    if winner_mention:
+                        winner_id = int(winner_mention.group(1))
+                        target_member = message.guild.get_member(winner_id)
+                        xp_to_change = xp_rewards.get("tournament_win", 0)
+                        reason = "Victoire en tournoi détectée (Bot Event)"
+
+            if target_member and xp_to_change != 0:
+                logger.info(f"Écoute Bot: {xp_to_change:+d} XP pour {target_member.display_name}. Raison: {reason}")
+                await update_user_xp(target_member.id, xp_to_change, is_weekly_xp=(xp_to_change > 0))
+                save_data(db)
+
+
+@client.event
+async def on_member_join(member: discord.Member):
+    """Gère l'arrivée d'un nouveau membre."""
+    logger.info(f"{member.name} a rejoint {member.guild.name}.")
+    settings = db.get("settings", {})
+
+    # --- Message public ---
+    welcome_channel_id = settings.get("welcome_channel_id")
+    welcome_message = settings.get("welcome_message", "Bienvenue {user} !")
+    if welcome_channel_id and welcome_message:
+        channel = member.guild.get_channel(welcome_channel_id)
+        if channel:
+            try:
+                content = welcome_message.replace("{user}", member.mention) \
+                                         .replace("{guild.name}", member.guild.name) \
+                                         .replace("{member_count}", str(member.guild.member_count))
+                embed = discord.Embed(description=content, color=NEON_GREEN)
+                embed.set_thumbnail(url=member.display_avatar.url)
+                embed = apply_embed_styles(embed, "welcome") # Appliquer style
+                await channel.send(embed=embed)
+            except discord.Forbidden:
+                logger.error(f"Permissions manquantes pour envoyer le message de bienvenue dans {channel.name}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'envoi du message de bienvenue: {e}")
+
+    # --- Message privé ---
+    dm_config = settings.get('welcome_dm', {})
+    if dm_config.get('enabled', False):
+        try:
+            title = dm_config.get('title', 'Bienvenue !').replace('{guild}', member.guild.name)
+            description = dm_config.get('description', 'Salut {user} !').replace('{user}', member.mention).replace('{guild}', member.guild.name)
+            color_str = dm_config.get('color', hex(NEON_GREEN))
+            try: color_val = int(color_str.replace("#", ""), 16)
+            except: color_val = NEON_GREEN
+            image_url = dm_config.get('image_url')
+
+            embed_dm = discord.Embed(title=title, description=description, color=color_val)
+            if image_url: embed_dm.set_image(url=image_url)
+            embed_dm.set_thumbnail(url=member.guild.icon.url if member.guild.icon else client.user.display_avatar.url)
+            await member.send(embed=embed_dm)
+        except discord.Forbidden:
+            logger.warning(f"Impossible d'envoyer un MP de bienvenue à {member.name} (DMs bloqués).")
+        except Exception as e:
+            logger.exception(f"Erreur inattendue lors de l'envoi du MP de bienvenue: {e}")
+
+    await trigger_avatar_change('member_join')
+
+@client.event
+async def on_member_remove(member: discord.Member):
+    """Gère le départ d'un membre."""
+    logger.info(f"{member.name} a quitté {member.guild.name}.")
+    settings = db.get("settings", {})
+    farewell_channel_id = settings.get("farewell_channel_id")
+    farewell_message = settings.get("farewell_message", "Au revoir {user}.")
+
+    if farewell_channel_id and farewell_message:
+        channel = member.guild.get_channel(farewell_channel_id)
+        if channel:
+            try:
+                content = farewell_message.replace("{user}", member.display_name)
+                embed = discord.Embed(description=content, color=DARK_RED)
+                embed.set_thumbnail(url=member.display_avatar.url)
+                embed = apply_embed_styles(embed, "farewell") # Appliquer style
+                await channel.send(embed=embed)
+            except discord.Forbidden:
+                logger.error(f"Permissions manquantes pour envoyer le message de départ dans {channel.name}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'envoi du message de départ: {e}")
+
+    await trigger_avatar_change('member_remove')
+
+# ==================================================================================================
+# 12. COMMANDES SLASH (Utilitaires & Systèmes de Base)
+# ==================================================================================================
+
+# --- Commande Ping ---
+@client.tree.command(name="ping", description="Vérifie la latence du bot.")
+async def ping(interaction: discord.Interaction):
+    latency = round(client.latency * 1000)
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"Latence : **{latency}ms**",
+        color=NEON_GREEN if latency < 150 else (RETRO_ORANGE if latency < 300 else DARK_RED)
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# --- Commande /rank (REMPLACE /xp) ---
+@client.tree.command(name="rank", description="Affiche ton profil de progression, ton rang global et ton rang hebdo.")
+@app_commands.describe(membre="Voir le profil d'un autre membre (optionnel).")
+async def rank(interaction: discord.Interaction, membre: Optional[discord.Member] = None):
+    # CORRECTION: defer() doit être éphémère pour que followup() le soit aussi.
+    await interaction.response.defer(ephemeral=True)
+
+    target_user = membre or interaction.user
+    if target_user.bot:
+        await interaction.followup.send("Les bots n'ont pas de profil.", ephemeral=True)
+        return
+
+    user_data = get_user_xp_data(target_user.id)
+
+    # Récupérer les classements
+    global_rank = get_global_rank(target_user.id)
+    weekly_rank = get_weekly_rank(target_user.id)
+
+    current_level = user_data["level"]
+    current_xp = user_data["xp"]
+    required_xp = get_xp_for_level(current_level)
+
+    # Générer l'image de la carte /rank
+    rank_card_buffer = await generate_rank_card_image(
+        current_xp, required_xp, current_level, global_rank, weekly_rank,
+        target_user.display_name, target_user.display_avatar.url
+    )
+
+    if rank_card_buffer:
+        rank_card_file = discord.File(rank_card_buffer, filename=f"{target_user.name}_rank_card.png")
+        await interaction.followup.send(file=rank_card_file, ephemeral=True)
+    else:
+        # Fallback texte si Pillow a échoué
+        embed = discord.Embed(
+            title=f"📊 Profil XP – {target_user.display_name}",
+            color=get_level_color(current_level)
+        )
+        embed.description = (
+            f"**Niveau :** {current_level}\n"
+            f"**XP :** {current_xp} / {required_xp}\n"
+            f"**Rang Global :** #{global_rank if global_rank != -1 else 'N/A'}\n"
+            f"**Rang Hebdo :** #{weekly_rank if weekly_rank != -1 else 'N/A'}"
+        )
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+        embed.set_footer(text="Erreur: La génération de l'image de la carte a échoué.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# --- Commandes Anniversaire ---
+birthday_group = app_commands.Group(name="birthday", description="Gère ton anniversaire.")
+
+@birthday_group.command(name="set", description="Enregistre ton anniversaire (JJ/MM).")
+@app_commands.describe(date="Ta date d'anniversaire (ex: 25/12).")
+async def birthday_set(interaction: discord.Interaction, date: str):
+    user_id_str = str(interaction.user.id)
+    try:
+        parsed_date = datetime.datetime.strptime(date.strip(), "%d/%m")
+        birthday_key = f"{parsed_date.month:02d}-{parsed_date.day:02d}"
+        db.setdefault("birthdays", {})[user_id_str] = birthday_key
         save_data(db)
+        await interaction.response.send_message(f"✅ Anniversaire enregistré pour le **{parsed_date.day:02d}/{parsed_date.month:02d}**.", ephemeral=True)
+    except ValueError:
+        await interaction.response.send_message("❌ Format de date invalide. Utilise **JJ/MM** (ex: 05/01).", ephemeral=True)
+
+@birthday_group.command(name="remove", description="Supprime ton anniversaire enregistré.")
+async def birthday_remove(interaction: discord.Interaction):
+    user_id_str = str(interaction.user.id)
+    if user_id_str in db.get("birthdays", {}):
+        del db["birthdays"][user_id_str]
+        save_data(db)
+        await interaction.response.send_message("✅ Ton anniversaire a été supprimé.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Tu n'avais pas enregistré d'anniversaire.", ephemeral=True)
+
+client.tree.add_command(birthday_group)
+
+@client.tree.command(name="birthdaylist", description="Affiche la liste des prochains anniversaires.")
+async def birthdaylist(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    birthdays = db.get("birthdays", {})
+    if not birthdays:
+        return await interaction.followup.send("Aucun anniversaire enregistré.", ephemeral=True)
+
+    today_str = get_adjusted_time().strftime("%m-%d")
+    upcoming = []
+    past = []
+
+    for user_id_str, bday_date in birthdays.items():
+        try:
+            member = interaction.guild.get_member(int(user_id_str))
+            if member:
+                if bday_date >= today_str:
+                    upcoming.append((member, bday_date))
+                else:
+                    past.append((member, bday_date))
+        except (ValueError, AttributeError):
+            continue
+
+    upcoming.sort(key=lambda x: x[1])
+    past.sort(key=lambda x: x[1])
+    sorted_birthdays = upcoming + past
+
+    if not sorted_birthdays:
+        return await interaction.followup.send("Aucun anniversaire trouvé pour les membres actuels.", ephemeral=True)
+
+    embed = discord.Embed(title="🎂 Prochains Anniversaires 🎂", color=GOLD_COLOR)
+    description = ""
+    count = 0
+    mois_fr = ["", "Jan", "Fév", "Mar", "Avr", "Mai", "Juin", "Juil", "Aoû", "Sep", "Oct", "Nov", "Déc"]
+    for member, bday_date in sorted_birthdays:
+        try:
+            month, day = map(int, bday_date.split('-'))
+            formatted_date = f"{day:02d} {mois_fr[month]}"
+            description += f"• **{member.display_name}** - {formatted_date}\n"
+            count += 1
+            if count >= 15:
+                description += "*... et plus encore !*"
+                break
+        except (ValueError, IndexError):
+            continue
+
+    embed.description = description if description else "Aucun anniversaire à afficher."
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@client.tree.command(name="nextbirthday", description="Affiche le prochain anniversaire.")
+async def nextbirthday(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    birthdays = db.get("birthdays", {})
+    if not birthdays: return await interaction.followup.send("Aucun anniversaire enregistré.", ephemeral=True)
+
+    today = get_adjusted_time().date()
+    today_str = today.strftime("%m-%d")
+    upcoming = []
+    past = []
+
+    for user_id_str, bday_date in birthdays.items():
+        try:
+            member = interaction.guild.get_member(int(user_id_str))
+            if member:
+                if bday_date >= today_str: upcoming.append((member, bday_date))
+                else: past.append((member, bday_date))
+        except: continue
+
+    upcoming.sort(key=lambda x: x[1])
+    past.sort(key=lambda x: x[1])
+    sorted_birthdays = upcoming + past
+
+    if not sorted_birthdays: return await interaction.followup.send("Aucun anniversaire pour les membres actuels.", ephemeral=True)
+
+    next_bday_member, next_bday_date_str = sorted_birthdays[0]
+    month, day = map(int, next_bday_date_str.split('-'))
+
+    next_bday_dt = datetime.datetime(today.year, month, day)
+    if next_bday_dt.date() < today:
+        next_bday_dt = datetime.datetime(today.year + 1, month, day)
+
+    embed = discord.Embed(
+        title="🎉 Prochain Anniversaire 🎉",
+        description=f"Le prochain est celui de **{next_bday_member.mention}** : {discord.utils.format_dt(next_bday_dt, style='R')} !",
+        color=NEON_GREEN
+    )
+    embed.set_footer(text=f"Date : {discord.utils.format_dt(next_bday_dt, style='D')}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+birthday_admin_group = app_commands.Group(name="birthdayadmin", description="Commandes admin pour les anniversaires.", default_permissions=discord.Permissions(administrator=True))
+
+@birthday_admin_group.command(name="config", description="Configure le salon d'annonce des anniversaires.")
+@app_commands.describe(salon="Le salon où annoncer les anniversaires.")
+async def birthday_admin_config(interaction: discord.Interaction, salon: discord.TextChannel):
+    db.setdefault("settings", {}).setdefault("birthday_settings", {})["channel_id"] = salon.id
+    save_data(db)
+    await interaction.response.send_message(f"✅ Annonces d'anniversaire configurées pour {salon.mention}.", ephemeral=True)
+
+client.tree.add_command(birthday_admin_group)
+
+# --- Commandes Notifications (Refonte "nom" et "api_key") ---
+notif_group = app_commands.Group(name="notif", description="Gère le système de notifications.", default_permissions=discord.Permissions(administrator=True))
+
+async def platform_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    platforms = ["YouTube", "Twitch", "Kick", "TikTok"]
+    return [
+        app_commands.Choice(name=p, value=p.lower())
+        for p in platforms if current.lower() in p.lower()
+    ]
+
+# Autocomplete basé sur le NOM du profil
+async def profile_name_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    guild_id_str = str(interaction.guild_id)
+    sources = notif_db.get("servers", {}).get(guild_id_str, {}).get("sources", [])
+    choices = set()
+    for source in sources:
+        name = source.get("name") # Utilise .get() pour sécurité
+        if name and current.lower() in name.lower():
+            choices.add(name)
+    return [app_commands.Choice(name=choice, value=choice) for choice in choices][:25]
+
+
+@notif_group.command(name="add", description="Ajoute un profil de notification.")
+@app_commands.autocomplete(plateforme=platform_autocomplete)
+@app_commands.describe(
+    nom="Un nom unique pour ce profil (ex: Waeky - Lives).",
+    plateforme="La plateforme (YouTube, Twitch...).",
+    categorie="Notifier les Vides ou les Lives ?",
+    identifiant="Nom d'utilisateur, ID de chaîne, ou URL.",
+    canal="Le salon où envoyer les notifications.",
+    api_key="Clé API (Optionnel, requis pour TikTok)."
+)
+async def notif_add(
+    interaction: discord.Interaction, 
+    nom: str, 
+    plateforme: str,
+    categorie: Literal["Live", "Vidéo"],
+    identifiant: str, 
+    canal: discord.TextChannel,
+    api_key: Optional[str] = None
+):
+    await interaction.response.defer(ephemeral=True)
+    guild_id_str = str(interaction.guild_id)
+    platform_lower = plateforme.lower()
+    if platform_lower not in PLATFORM_CHECKERS:
+        await interaction.followup.send(f"Plateforme '{plateforme}' non supportée.", ephemeral=True)
+        return
+
+    # Validation YouTube (doit utiliser l'API)
+    if platform_lower == "youtube" and not YOUTUBE_API_KEY:
+        await interaction.followup.send("❌ Erreur: `YOUTUBE_API_KEY` n'est pas définie dans le fichier `.env` du bot. Impossible d'ajouter une notification YouTube.", ephemeral=True)
+        return
+        
+    # Validation TikTok (doit avoir une clé)
+    if platform_lower == "tiktok" and not api_key:
+        await interaction.followup.send("❌ Erreur: TikTok nécessite une `api_key` (ex: de RapidAPI) pour fonctionner. Commande annulée.", ephemeral=True)
+        return
+
+    clean_name = nom.strip()
+    g_sources = notif_db.setdefault("servers", {}).setdefault(guild_id_str, {}).setdefault("sources", [])
+    
+    # CORRIGÉ (v2): Utilise .get("name") pour éviter le KeyError sur les anciens profils
+    if any(s.get("name") == clean_name for s in g_sources):
+        await interaction.followup.send(f"❌ Un profil avec le nom `{clean_name}` existe déjà.", ephemeral=True)
+        return
+
+    # AJOUTÉ: Définir un message @everyone par défaut
+    default_message = "@everyone {creator} est en ligne !"
+
+    # Ajout de la configuration
+    g_sources.append({
+        "name": clean_name, # Clé unique
+        "platform": platform_lower,
+        "id": identifiant.strip(), # L'ID/URL/Nom
+        "category": categorie.lower(), # live ou video (CORRIGÉ v3)
+        "channel_id": canal.id,
+        "config": {
+            "api_key": api_key, # Clé spécifique (pour TikTok)
+            "message_ping": default_message, # (MODIFIÉ: Message par défaut avec @everyone)
+            "embed_json": None
+        }
+    })
+    save_notif_data(notif_db)
+    await interaction.followup.send(f"✅ Profil **{clean_name}** (`{platform_lower.capitalize()}` / `{categorie.capitalize()}`) ajouté pour {canal.mention}. Le ping `@everyone` est activé par défaut. Utilise `/notif config` pour le modifier.", ephemeral=True)
+
+
+@notif_group.command(name="remove", description="Supprime un profil de notification.")
+@app_commands.autocomplete(nom=profile_name_autocomplete)
+@app_commands.describe(nom="Le nom unique du profil à supprimer.")
+async def notif_remove(interaction: discord.Interaction, nom: str):
+    await interaction.response.defer(ephemeral=True)
+    guild_id_str = str(interaction.guild_id)
+    g_config = notif_db.get("servers", {}).get(guild_id_str)
+
+    if not g_config or not g_config.get("sources"):
+        await interaction.followup.send("Aucun profil à supprimer.", ephemeral=True)
+        return
+
+    initial_count = len(g_config["sources"])
+    # CORRIGÉ (v2): Utilise .get("name")
+    g_config["sources"] = [s for s in g_config["sources"] if s.get("name") != nom]
+
+    if len(g_config["sources"]) < initial_count:
+        save_notif_data(notif_db)
+        # Nettoyer aussi les "last_seen"
+        last_seen = notif_db.setdefault("last_seen", {})
+        last_seen_key = f"{guild_id_str}:{nom}"
+        if last_seen_key in last_seen:
+            del last_seen[last_seen_key]
+        save_notif_data(notif_db)
+        await interaction.followup.send(f"🗑️ Profil `{nom}` supprimé.", ephemeral=True)
+    else:
+        await interaction.followup.send(f"Profil `{nom}` non trouvé.", ephemeral=True)
+
+
+@notif_group.command(name="list", description="Affiche les profils de notifications configurés.")
+async def notif_list(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild_id_str = str(interaction.guild_id)
+    g_sources = notif_db.get("servers", {}).get(guild_id_str, {}).get("sources", [])
+
+    if not g_sources:
+        await interaction.followup.send("Aucun profil de notification configuré.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title=f"📡 Profils de notifications - {interaction.guild.name}", color=NEON_BLUE)
+    description = ""
+    # CORRIGÉ (v2): Utilise .get() partout
+    for source in sorted(g_sources, key=lambda s: (s.get('platform', 'z'), s.get('name', 'z'))):
+        channel = interaction.guild.get_channel(source.get("channel_id"))
+        channel_mention = channel.mention if channel else "`Salon introuvable`"
+        platform = source.get('platform', 'N/A').capitalize()
+        category = source.get('category', 'N/A').capitalize()
+        name = source.get('name', 'Profil Invalide')
+        
+        description += f"• **{name}** (`{platform}` / `{category}`)\n"
+        description += f"  ID: `{source.get('id', 'N/A')}` ➡️ {channel_mention}\n"
+
+    embed.description = description
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# --- Commande d'Édition (Style /notif add) ---
+@notif_group.command(name="edit", description="Modifie un profil existant directement (Arguments optionnels).")
+@app_commands.autocomplete(nom=profile_name_autocomplete)
+@app_commands.describe(
+    nom="Le nom unique du profil à modifier.",
+    identifiant="Nouveau pseudo/ID (Laisser vide pour ne pas changer)",
+    canal="Nouveau salon (Laisser vide pour ne pas changer)",
+    message="Nouveau message/ping (Laisser vide pour ne pas changer)",
+    json="Nouveau JSON (Laisser vide pour ne pas changer)",
+    api_key="Nouvelle clé API (Laisser vide pour ne pas changer)"
+)
+async def notif_edit(
+    interaction: discord.Interaction,
+    nom: str,
+    identifiant: Optional[str] = None,
+    canal: Optional[discord.TextChannel] = None,
+    message: Optional[str] = None,
+    json: Optional[str] = None,
+    api_key: Optional[str] = None
+):
+    await interaction.response.defer(ephemeral=True)
+    guild_id_str = str(interaction.guild_id)
+    g_sources = notif_db.get("servers", {}).get(guild_id_str, {}).get("sources", [])
+
+    source_to_edit = None
+    for s in g_sources:
+        if s.get("name") == nom:
+            source_to_edit = s
+            break
+
+    if not source_to_edit:
+        await interaction.followup.send(f"❌ Profil `{nom}` introuvable.", ephemeral=True)
+        return
+
+    changes = []
+    config = source_to_edit.setdefault("config", {})
+
+    # Mise à jour des champs si fournis
+    if identifiant:
+        source_to_edit["id"] = identifiant.strip()
+        changes.append(f"• **Identifiant :** `{identifiant.strip()}`")
+    
+    if canal:
+        source_to_edit["channel_id"] = canal.id
+        changes.append(f"• **Salon :** {canal.mention}")
+
+    if message:
+        config["message_ping"] = message.strip()
+        changes.append("• **Message :** Mis à jour")
+
+    if json:
+        config["embed_json"] = json.strip()
+        changes.append("• **JSON :** Mis à jour")
+    
+    if api_key:
+        config["api_key"] = api_key.strip()
+        changes.append("• **API Key :** Mise à jour")
+
+    if not changes:
+        await interaction.followup.send("ℹ️ Aucune modification demandée (tous les champs optionnels étaient vides).", ephemeral=True)
+        return
+
+    save_notif_data(notif_db)
+    
+    response_text = f"✅ **Profil `{nom}` modifié avec succès !**\n" + "\n".join(changes)
+    await interaction.followup.send(response_text, ephemeral=True)
+
+
+# --- MODAL DE CONFIGURATION (Message / JSON / API) ---
+class NotifConfigModal(Modal):
+    def __init__(self, source_data: Dict):
+        profile_name = source_data.get('name', 'Erreur')
+        category = source_data.get('category', 'N/A').capitalize()
+        super().__init__(title=f"Options: {profile_name} ({category})")
+        
+        self.source_data = source_data
+        config = source_data.get("config", {})
+
+        self.message_ping = TextInput(
+            label="Message & Ping (HORS embed)",
+            placeholder="Ex: @everyone {creator} est en live! {url}",
+            default=config.get("message_ping", ""),
+            required=False,
+            style=discord.TextStyle.short
+        )
+        self.add_item(self.message_ping)
+        
+        self.embed_json = TextInput(
+            label="Configuration JSON (Avancé)",
+            placeholder="Collez le JSON d'embed ici. Laissez vide pour le mode simple.",
+            default=config.get("embed_json", ""),
+            required=False,
+            style=discord.TextStyle.paragraph
+        )
+        self.add_item(self.embed_json)
+
+        self.api_key = TextInput(
+            label="Clé API (Requis pour TikTok)",
+            placeholder="Clé API d'un service tiers (ex: RapidAPI).",
+            default=config.get("api_key", ""),
+            required=False,
+            style=discord.TextStyle.short
+        )
+        self.add_item(self.api_key)
+
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True) 
+        config = self.source_data.setdefault("config", {})
+        
+        config["message_ping"] = self.message_ping.value.strip() or None
+        config["embed_json"] = self.embed_json.value.strip() or None
+        config["api_key"] = self.api_key.value.strip() or None 
+        
+        # Nettoyage
+        config.pop("embed_title_simple", None)
+        config.pop("embed_desc_simple", None)
+        config.pop("embed_color_image_simple", None)
+        
+        response_message = f"⚙️ Configuration avancée de `{self.source_data.get('name')}` mise à jour."
+        
+        if config["embed_json"]:
+            try:
+                test_json_string = format_template(config["embed_json"])
+                json.loads(test_json_string)
+                response_message += "\n✅ JSON valide. Le mode simple sera ignoré."
+            except json.JSONDecodeError as e:
+                response_message += f"\n⚠️ **Erreur JSON :** `{e}`. Le bot tentera quand même."
+        else:
+            response_message += "\nℹ️ JSON vide. Mode simple activé."
+
+        save_notif_data(notif_db)
+        response_message += "\nUtilise `/notif test` pour confirmer."
+        await interaction.followup.send(response_message, ephemeral=True)
+
+
+@notif_group.command(name="config", description="Configure les options (Message, JSON) d'un profil (Mode Fenêtre).")
+@app_commands.autocomplete(nom=profile_name_autocomplete)
+@app_commands.describe(nom="Le nom unique du profil à configurer.")
+async def notif_config(interaction: discord.Interaction, nom: str):
+    guild_id_str = str(interaction.guild_id)
+    g_sources = notif_db.get("servers", {}).get(guild_id_str, {}).get("sources", [])
+
+    source_found = None
+    for source in g_sources:
+        if source.get("name") == nom:
+            source_found = source
+            break
+
+    if not source_found:
+        await interaction.response.send_message(f"Profil `{nom}` non trouvé.", ephemeral=True)
+    else:
+        await interaction.response.send_modal(NotifConfigModal(source_found))
+
+
+@notif_group.command(name="test", description="Envoie une notification de test pour un profil.")
+@app_commands.autocomplete(nom=profile_name_autocomplete)
+@app_commands.describe(nom="Le nom unique du profil à tester.")
+async def notif_test(interaction: discord.Interaction, nom: str):
+    await interaction.response.defer(ephemeral=True)
+    guild_id_str = str(interaction.guild_id)
+    g_sources = notif_db.get("servers", {}).get(guild_id_str, {}).get("sources", [])
+
+    source_to_test = None
+    for s in g_sources:
+        # CORRIGÉ (v2): Utilise .get("name")
+        if s.get("name") == nom:
+            source_to_test = s
+            break
+
+    if not source_to_test:
+        await interaction.followup.send(f"Profil `{nom}` non trouvé.", ephemeral=True)
+        return
+
+    # S'assurer que la config existe
+    source_to_test.setdefault("config", {})
+    
+    # Adapter le test à la catégorie (Live ou Vidéo)
+    category = source_to_test.get("category", "live") # 'live' par défaut
+    platform = source_to_test.get("platform", "unknown")
+    identifier = source_to_test.get("id", "Testeur")
+
+    # === DÉBUT DE LA CORRECTION (Placeholders par plateforme) ===
+
+    is_live = (category == "live")
+    
+    # Définir les placeholders par défaut
+    title = f"📣 LIVE (TEST) SUR {platform.capitalize()}"
+    desc = f"Je suis en live! (Ceci est un test /notif test pour {platform})"
+    game = "Inconnu"
+    thumbnail_img = "https://via.placeholder.com/400x225.png/9146FF/FFFFFF?text=Test+PoxelBot"
+    url = "https://discord.com"
+
+    if platform == "kick":
+        title = "🟢 LIVE KICK (TEST)"
+        desc = "Je suis en live sur Kick! (Ceci est un test /notif test)"
+        game = "Just Chatting"
+        thumbnail_img = "https://i.imgur.com/tD36A9j.png" # Image d'exemple Kick
+        url = f"https://kick.com/{identifier}"
+
+    elif platform == "twitch":
+        title = "🟣 LIVE TWITCH (TEST)"
+        desc = "Grosse game sur Twitch! (Ceci est un test /notif test)"
+        game = "Apex Legends"
+        thumbnail_img = "https://i.imgur.com/vIqI4So.png" # Image d'exemple Twitch
+        url = f"https://twitch.tv/{identifier}"
+        
+    elif platform == "youtube":
+        if is_live:
+            title = "🟥 LIVE YOUTUBE (TEST)"
+            desc = "On se retrouve en direct sur YouTube! (Ceci est un test /notif test)"
+            game = "YouTube" # L'API YT ne fournit pas toujours le jeu
+        else: # category == "video"
+            title = "🎥 NOUVELLE VIDÉO (TEST)"
+            desc = "Ma dernière vidéo est sortie! (Ceci est un test /notif test)"
+            game = "YouTube"
+        thumbnail_img = "https://i.imgur.com/f033z2b.png" # Image d'exemple YouTube
+        url = f"https://www.youtube.com/watch?v=dQw4w9WgXcQ" # Lien exemple
+
+    # Créer un événement de test
+    test_event = {
+        "id": f"test_{int(get_adjusted_time().timestamp())}",
+        "title": title,
+        "url": url,
+        "thumbnail": thumbnail_img, # Utilise la nouvelle image d'exemple
+        "description": desc,
+        "creator": identifier, 
+        "creator_avatar": interaction.user.display_avatar.url, # Utilise ton avatar Discord pour le test
+        "timestamp": get_adjusted_time().isoformat(),
+        "is_live": is_live,
+        "platform": platform,
+        "game": game 
+    }
+    
+    # === FIN DE LA CORRECTION ===
+    
+    # Envoyer la notification en utilisant la config SAUVEGARDÉE
+    try:
+        await send_notification(interaction.guild, source_to_test, test_event)
+        await interaction.followup.send(f"Notification de test (`{category}`) envoyée pour `{nom}` avec la configuration sauvegardée ! L'embed doit correspondre au style demandé.", ephemeral=True)
+    except Exception as e:
+        logger.exception(f"Erreur lors de l'ENVOI du test pour {nom}: {e}")
+        await interaction.followup.send(f"❌ **Erreur lors de la création de l'embed de test.**\n"
+                                        f"Vérifie ton JSON ou ta configuration simple.\n"
+                                        f"Erreur: `{e}`", ephemeral=True)
+
+# --- NOUVEAU: Commande de Check Forcé ---
+@notif_group.command(name="check_now", description="Force la vérification immédiate de TOUTES les sources (YouTube inclus !).")
+async def notif_check_now(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild_id_str = str(interaction.guild_id)
+    g_config = notif_db.get("servers", {}).get(guild_id_str)
+    
+    if not g_config or not g_config.get("sources"):
+        await interaction.followup.send("Aucune notification configurée sur ce serveur.", ephemeral=True)
+        return
+
+    sources = g_config["sources"]
+    await interaction.followup.send(f"🔄 **Vérification forcée lancée pour {len(sources)} sources (YouTube compris)...**\n*Cela peut prendre quelques instants.*", ephemeral=True)
+
+    tasks_list = []
+    for source in sources:
+        # On appelle directement la fonction de traitement (Partie 3)
+        tasks_list.append(process_single_source(interaction.guild, source))
+
+    if tasks_list:
+        await asyncio.gather(*tasks_list, return_exceptions=True)
+    
+    # On force la sauvegarde après le scan manuel
+    save_notif_data(notif_db)
+
+    try:
+        await interaction.edit_original_response(content=f"✅ **Vérification manuelle terminée !**\nLes nouvelles notifications ont été envoyées (s'il y en avait).")
+    except:
+        pass # Si le message a été supprimé entre temps
+
+client.tree.add_command(notif_group)
+
+# --- Commandes Freegames ---
+freegames_group = app_commands.Group(name="freegames", description="Gère les notifications de jeux gratuits.", default_permissions=discord.Permissions(administrator=True))
+
+@freegames_group.command(name="config", description="Configure le salon pour les annonces de jeux gratuits.")
+@app_commands.describe(salon="Le salon où envoyer les notifications.")
+async def freegames_config(interaction: discord.Interaction, salon: discord.TextChannel):
+    db.setdefault("settings", {}).setdefault("free_games_settings", {})["channel_id"] = salon.id
+    save_data(db)
+    await interaction.response.send_message(f"✅ Annonces de jeux gratuits configurées pour {salon.mention}.", ephemeral=True)
+
+@freegames_group.command(name="remove", description="Désactive les annonces de jeux gratuits (Supprime le salon configuré).")
+async def freegames_remove(interaction: discord.Interaction):
+    settings = db.setdefault("settings", {}).setdefault("free_games_settings", {})
+    if settings.get("channel_id"):
+        settings["channel_id"] = None
+        save_data(db)
+        await interaction.response.send_message("✅ Le salon des jeux gratuits a été supprimé. Les annonces sont désactivées.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Aucun salon n'était configuré pour les jeux gratuits.", ephemeral=True)
+
+client.tree.add_command(freegames_group)
+
+
+@client.tree.command(name="free", description="Affiche les derniers jeux gratuits trouvés.")
+async def free(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    api_url = "https://www.gamerpower.com/api/giveaways?platform=pc&sort-by=date" # PC, trié par date
+    # (Va utiliser le nouveau fetch_url hybride)
+    games = await fetch_url(api_url, response_type='json')
+
+    if games is None or not isinstance(games, list):
+        await interaction.followup.send("Impossible de récupérer la liste des jeux gratuits pour le moment.", ephemeral=True)
+        return
+
+    if not games:
+        await interaction.followup.send("Aucun jeu gratuit trouvé actuellement.", ephemeral=True)
+        return
+
+    # Construire les embeds
+    embeds_to_send = []
+    # Pas de limite ici, on prend tout (le chunking gère l'affichage)
+    for game_data in games: 
+        try:
+            embed = await create_free_game_embed(game_data)
+            embeds_to_send.append(embed)
+        except Exception as e:
+            logger.error(f"Erreur lors de la création de l'embed pour le jeu {game_data.get('title')}: {e}")
+
+    if embeds_to_send:
+        # Envoi groupé (chunking par 10)
+        chunk_size = 10
+        chunks = [embeds_to_send[i:i + chunk_size] for i in range(0, len(embeds_to_send), chunk_size)]
+        
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                await interaction.followup.send(content="🎁 **Voici TOUS les jeux PC gratuits trouvés :**", embeds=chunk, ephemeral=True)
+            else:
+                await interaction.followup.send(embeds=chunk, ephemeral=True)
+    else:
+        # Si aucun embed n'a pu être créé
+        await interaction.followup.send("Erreur lors de la récupération des détails des jeux gratuits.", ephemeral=True)
+
+# ==================================================================================================
+# 12.5. COMMANDES CINÉ PIXEL (NOUVEAU - Catégorisé)
+# ==================================================================================================
+
+# --- Commande de Configuration ---
+cineconfig_group = app_commands.Group(name="cineconfig", description="Configure les salons pour Ciné Pixel.", default_permissions=discord.Permissions(administrator=True))
+
+@cineconfig_group.command(name="set_channel", description="Associe un salon à une catégorie de sorties.")
+@app_commands.describe(
+    categorie="La catégorie à configurer.",
+    salon="Le salon où envoyer les notifications."
+)
+@app_commands.choices(categorie=[
+    app_commands.Choice(name="Sorties Séries", value="news_series"),
+    app_commands.Choice(name="Sorties Anime", value="news_anime"),
+    app_commands.Choice(name="Sorties Cartoons", value="news_cartoons"),
+    app_commands.Choice(name="Sorties Films", value="news_movies"),
+    app_commands.Choice(name="Épisodes Séries", value="episodes_series"),
+    app_commands.Choice(name="Épisodes Anime", value="episodes_anime"),
+    app_commands.Choice(name="Épisodes Cartoons", value="episodes_cartoons"),
+])
+async def cineconfig_set(interaction: discord.Interaction, categorie: str, salon: discord.TextChannel):
+    db.setdefault("settings", {}).setdefault("cine_pixel_channels", {})[categorie] = salon.id
+    save_data(db)
+    
+    # Mapping des noms lisibles
+    nice_names = {
+        "news_series": "Sorties Séries", "news_anime": "Sorties Anime", "news_cartoons": "Sorties Cartoons",
+        "news_movies": "Sorties Films", "episodes_series": "Épisodes Séries", 
+        "episodes_anime": "Épisodes Anime", "episodes_cartoons": "Épisodes Cartoons"
+    }
+    
+    await interaction.response.send_message(f"✅ La catégorie **{nice_names[categorie]}** est maintenant envoyée dans {salon.mention}.", ephemeral=True)
+
+@cineconfig_group.command(name="remove_channel", description="Désactive les notifications pour une catégorie.")
+@app_commands.describe(categorie="La catégorie à désactiver.")
+@app_commands.choices(categorie=[
+    app_commands.Choice(name="Sorties Séries", value="news_series"),
+    app_commands.Choice(name="Sorties Anime", value="news_anime"),
+    app_commands.Choice(name="Sorties Cartoons", value="news_cartoons"),
+    app_commands.Choice(name="Sorties Films", value="news_movies"),
+    app_commands.Choice(name="Épisodes Séries", value="episodes_series"),
+    app_commands.Choice(name="Épisodes Anime", value="episodes_anime"),
+    app_commands.Choice(name="Épisodes Cartoons", value="episodes_cartoons"),
+])
+async def cineconfig_remove(interaction: discord.Interaction, categorie: str):
+    channels_config = db.setdefault("settings", {}).setdefault("cine_pixel_channels", {})
+    if categorie in channels_config:
+        del channels_config[categorie]
+        save_data(db)
+        await interaction.response.send_message(f"✅ Notifications désactivées pour la catégorie sélectionnée.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Aucune notification n'était configurée pour cette catégorie.", ephemeral=True)
+
+client.tree.add_command(cineconfig_group)
+
+# --- Helper pour les Commandes Privées ---
+async def handle_manual_cine_check(interaction: discord.Interaction, category_key: str, media_type: str, is_anime: bool = False, is_cartoon: bool = False):
+    """
+    Exécute une vérification manuelle et envoie les résultats à l'utilisateur (privé).
+    """
+    await interaction.response.defer(ephemeral=True)
+    if not TMDB_API_KEY:
+        await interaction.followup.send("❌ Clé API TMDB manquante.", ephemeral=True)
+        return
+
+    # URL TMDB adaptée
+    if "news" in category_key:
+        if media_type == 'movie':
+            url = f"https://api.themoviedb.org/3/movie/now_playing?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
+        else: # TV
+            url = f"https://api.themoviedb.org/3/tv/on_the_air?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
+    else: 
+        url = f"https://api.themoviedb.org/3/tv/airing_today?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
+
+    data = await fetch_url(url, response_type='json')
+    if not data or "results" not in data:
+        await interaction.followup.send("Aucune donnée trouvée.", ephemeral=True)
+        return
+
+    embeds_to_send = []
+    today = get_adjusted_time().date()
+
+    for item in data["results"]:
+        item_id = item["id"]
+        
+        # Filtrage
+        detected_cat = classify_content(item, media_type)
+        should_process = False
+        if is_anime and detected_cat == 'anime': should_process = True
+        elif is_cartoon and detected_cat == 'cartoon': should_process = True
+        elif not is_anime and not is_cartoon and detected_cat == 'series' and media_type == 'tv': should_process = True
+        elif media_type == 'movie' and not is_anime and not is_cartoon: should_process = True
+
+        if not should_process: continue
+
+        try:
+            embed = None
+            if "news" in category_key:
+                if media_type == 'tv':
+                    first_air = item.get('first_air_date')
+                    # Pour la commande manuelle, on est plus souple sur la date (2 semaines)
+                    if first_air and (today - datetime.datetime.strptime(first_air, "%Y-%m-%d").date()).days < 14:
+                        embed = await create_cine_pixel_embed(item_id, media_type, detected_cat, is_episode=False)
+                else: # Movie
+                    embed = await create_cine_pixel_embed(item_id, media_type, detected_cat, is_episode=False)
+
+            elif "episodes" in category_key and media_type == 'tv':
+                details_url = f"https://api.themoviedb.org/3/tv/{item_id}?api_key={TMDB_API_KEY}&language=fr-FR"
+                det = await fetch_url(details_url, response_type='json')
+                last_ep = det.get('last_episode_to_air')
+                if last_ep:
+                    # Pour manuel, on affiche si récent (pas juste aujourd'hui)
+                    embed = await create_cine_pixel_embed(item_id, media_type, detected_cat, is_episode=True, episode_data=last_ep)
+
+            if embed:
+                embeds_to_send.append(embed)
+        except: pass
+
+    if embeds_to_send:
+        # Envoi par paquets de 10 (car c'est privé, pas de risque de spam channel)
+        # Mais attention limite taille. On reste prudent avec 5.
+        chunk_size = 5
+        chunks = [embeds_to_send[i:i + chunk_size] for i in range(0, len(embeds_to_send), chunk_size)]
+        
+        await interaction.followup.send(f"🎬 **Résultats pour {category_key} :**", ephemeral=True)
+        for chunk in chunks:
+            await interaction.followup.send(embeds=chunk, ephemeral=True)
+    else:
+        await interaction.followup.send("Aucun résultat récent trouvé pour cette catégorie.", ephemeral=True)
+
+# --- Commandes Publiques (Manuelles / Privées) ---
+
+@client.tree.command(name="news_series", description="[Privé] Voir les sorties récentes de séries.")
+async def cmd_news_series(interaction: discord.Interaction):
+    await handle_manual_cine_check(interaction, 'news_series', 'tv', is_anime=False, is_cartoon=False)
+
+@client.tree.command(name="news_anime", description="[Privé] Voir les sorties récentes d'animés.")
+async def cmd_news_anime(interaction: discord.Interaction):
+    await handle_manual_cine_check(interaction, 'news_anime', 'tv', is_anime=True)
+
+@client.tree.command(name="news_cartoons", description="[Privé] Voir les sorties récentes de cartoons.")
+async def cmd_news_cartoons(interaction: discord.Interaction):
+    await handle_manual_cine_check(interaction, 'news_cartoons', 'tv', is_cartoon=True)
+
+@client.tree.command(name="news_movies", description="[Privé] Voir les sorties récentes de films.")
+async def cmd_news_movies(interaction: discord.Interaction):
+    await handle_manual_cine_check(interaction, 'news_movies', 'movie')
+
+@client.tree.command(name="episodes_series", description="[Privé] Voir les épisodes de séries sortis aujourd'hui.")
+async def cmd_episodes_series(interaction: discord.Interaction):
+    await handle_manual_cine_check(interaction, 'episodes_series', 'tv', is_anime=False, is_cartoon=False)
+
+@client.tree.command(name="episodes_anime", description="[Privé] Voir les épisodes d'animés sortis aujourd'hui.")
+async def cmd_episodes_anime(interaction: discord.Interaction):
+    await handle_manual_cine_check(interaction, 'episodes_anime', 'tv', is_anime=True)
+
+@client.tree.command(name="episodes_cartoons", description="[Privé] Voir les épisodes de cartoons sortis aujourd'hui.")
+async def cmd_episodes_cartoons(interaction: discord.Interaction):
+    await handle_manual_cine_check(interaction, 'episodes_cartoons', 'tv', is_cartoon=True)
+
+
+# --- NOUVEAU: Commande de Test Admin (Force Post No Limit) ---
+@client.tree.command(name="admin_test_news", description="[Admin] Force la publication (FreeGames ou CinéPixel) SANS LIMITES.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(module="Le module à tester.")
+async def admin_test_news(
+    interaction: discord.Interaction,
+    module: Literal["FreeGames", "CinéPixel"]
+):
+    await interaction.response.defer(ephemeral=True)
+    
+    if module == "FreeGames":
+        free_channel_id = db["settings"].get("free_games_settings", {}).get("channel_id")
+        if not free_channel_id:
+            await interaction.followup.send("❌ Salon FreeGames non configuré.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(free_channel_id)
+        if not channel:
+            await interaction.followup.send("❌ Salon FreeGames introuvable.", ephemeral=True)
+            return
+            
+        # Fetch
+        api_url = "https://www.gamerpower.com/api/giveaways?platform=pc"
+        games = await fetch_url(api_url, response_type='json')
+        
+        if games:
+            embeds_to_send = []
+            for game in games: # No limit, on prend tout pour le test
+                try:
+                    embed = await create_free_game_embed(game)
+                    embeds_to_send.append(embed)
+                except: pass
+            
+            if embeds_to_send:
+                # CORRECTION CRITIQUE: Envoi 1 par 1 pour éviter l'erreur "Embed size > 6000"
+                # Les descriptions cumulées de 5 ou 10 embeds dépassent la limite Discord.
+                await interaction.followup.send(f"✅ Envoi de {len(embeds_to_send)} embeds en cours (1 par 1 pour sécurité)...", ephemeral=True)
+                
+                for i, embed in enumerate(embeds_to_send):
+                    msg = None
+                    if i == 0:
+                        msg = f"[TEST ADMIN] @everyone 🚨 **ALERTE JEU GRATUIT !** 🚨\nUn ou plusieurs nouveaux cadeaux sont disponibles ! 🎁🔥"
+                    
+                    try:
+                        await channel.send(content=msg, embed=embed)
+                        await asyncio.sleep(1.5) # Pause anti-ratelimit
+                    except Exception as e:
+                        logger.error(f"Erreur envoi embed {i}: {e}")
+
+                await interaction.followup.send(f"✅ Test terminé.", ephemeral=True)
+            else:
+                await interaction.followup.send("⚠️ API OK mais aucun embed généré.", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Erreur API GamerPower (vide ou HS).", ephemeral=True)
+
+    elif module == "CinéPixel":
+        if not TMDB_API_KEY:
+            await interaction.followup.send("❌ Clé API TMDB manquante.", ephemeral=True)
+            return
+        
+        # Pour le test, on prend le salon des Séries par défaut ou on demande de configurer
+        channels_cfg = db["settings"].get("cine_pixel_channels", {})
+        target_channel_id = channels_cfg.get("news_series") or channels_cfg.get("news_movies")
+        
+        if not target_channel_id:
+            await interaction.followup.send("❌ Aucun salon Ciné Pixel configuré (commencez par /cineconfig set_channel news_series ...).", ephemeral=True)
+            return
+            
+        channel = interaction.guild.get_channel(target_channel_id)
+        if not channel:
+            await interaction.followup.send("❌ Salon introuvable.", ephemeral=True)
+            return
+
+        # Fetch Séries pour le test
+        url_tv = f"https://api.themoviedb.org/3/tv/on_the_air?api_key={TMDB_API_KEY}&language=fr-FR&page=1"
+        data_tv = await fetch_url(url_tv, response_type='json')
+        
+        embeds_to_send = []
+        
+        # --- AJOUT DU TEST BIG EVENT ---
+        # On force l'ajout d'Arcane (94605) pour valider le style "Big Event"
+        try:
+            embed_big = await create_cine_pixel_embed(94605, "tv", "news_anime", is_episode=False)
+            if embed_big: 
+                embeds_to_send.append(embed_big)
+                await interaction.channel.send(content="[DEBUG] Ajout forcé de 'Arcane' pour tester le style Big Event.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Test Big Event failed: {e}")
+        # -------------------------------
+
+        if data_tv and "results" in data_tv:
+            for tv in data_tv["results"]: # No limit
+                # On teste avec des séries standards
+                embed = await create_cine_pixel_embed(tv["id"], "tv", "series", is_episode=False)
+                if embed: embeds_to_send.append(embed)
+        
+        if embeds_to_send:
+            await interaction.followup.send(f"✅ Envoi de {len(embeds_to_send)} embeds de test dans {channel.mention} (1 par 1)...", ephemeral=True)
+            
+            for i, embed in enumerate(embeds_to_send):
+                msg = None
+                if i == 0:
+                    msg = f"[TEST ADMIN] 🍿 **CINÉ PIXEL ACTU !**"
+                
+                try:
+                    await channel.send(content=msg, embed=embed)
+                    await asyncio.sleep(1.5)
+                except Exception as e:
+                    logger.error(f"Erreur envoi embed {i}: {e}")
+
+            await interaction.followup.send(f"✅ Test terminé.", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠️ Aucune donnée trouvée sur TMDB.", ephemeral=True)
+
+
+# ==================================================================================================
+# 13. SYSTÈME DE TEAM
+# ==================================================================================================
+team_group = app_commands.Group(name="team", description="Gère ton équipe.")
+
+async def team_autocomplete(interaction: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+    """Autocomplete pour les noms de teams."""
+    teams = db.get("teams", {})
+    return [
+        app_commands.Choice(name=name, value=name)
+        for name, data in teams.items()
+        if isinstance(data, dict) and isinstance(data.get("name"), str) and current.lower() in data["name"].lower()
+    ][:25]
+
+def get_team_color(team_data: Dict) -> int:
+    """Retourne la couleur de la team ou la couleur par défaut."""
+    color_hex = team_data.get("color_hex")
+    if color_hex and re.match(r"^#(?:[0-9a-fA-F]{3}){1,2}$", color_hex):
+        try:
+            return int(color_hex.lstrip('#'), 16)
+        except ValueError:
+            return TEAM_COLOR 
+    return TEAM_COLOR 
+
+# --- Commandes Team ---
+@team_group.command(name="create", description="Crée une nouvelle équipe.")
+@app_commands.describe(nom="Le nom de votre équipe.")
+async def team_create(interaction: discord.Interaction, nom: str):
+    user_data = get_user_xp_data(interaction.user.id)
+    if user_data.get("team_name"):
+        await interaction.response.send_message("❌ Tu fais déjà partie d'une équipe !", ephemeral=True)
+        return
+
+    team_name = nom.strip()
+    if not team_name:
+        await interaction.response.send_message("❌ Le nom de l'équipe ne peut pas être vide.", ephemeral=True)
+        return
+
+    if team_name in db.get("teams", {}):
+        await interaction.response.send_message("❌ Une équipe avec ce nom existe déjà.", ephemeral=True)
+        return
+
+    # Créer la team
+    db.setdefault("teams", {})[team_name] = {
+        "name": team_name,
+        "creator_id": interaction.user.id,
+        "members": [interaction.user.id],
+        "logo_url": None,
+        "role_id": None,
+        "color_hex": f"#{TEAM_COLOR:06x}" 
+    }
+    user_data["team_name"] = team_name
+    save_data(db)
+
+    embed = discord.Embed(
+        title=f"🎉 Équipe Créée : {team_name}",
+        description=f"Félicitations {interaction.user.mention}, tu as fondé l'équipe **{team_name}** !",
+        color=TEAM_COLOR
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@team_group.command(name="add", description="Ajoute un membre à ton équipe (tu dois être le créateur).")
+@app_commands.describe(membre="Le membre à ajouter.")
+async def team_add(interaction: discord.Interaction, membre: discord.Member):
+    user_data = get_user_xp_data(interaction.user.id)
+    team_name = user_data.get("team_name")
+    if not team_name:
+        await interaction.response.send_message("❌ Tu n'es dans aucune équipe.", ephemeral=True)
+        return
+
+    team_data = db.get("teams", {}).get(team_name)
+    if not team_data or team_data.get("creator_id") != interaction.user.id:
+        await interaction.response.send_message("❌ Seul le créateur de l'équipe peut ajouter des membres.", ephemeral=True)
+        return
+
+    if membre.bot or membre.id == interaction.user.id:
+        await interaction.response.send_message("❌ Tu ne peux pas t'ajouter toi-même ou un bot.", ephemeral=True)
+        return
+
+    target_data = get_user_xp_data(membre.id)
+    if target_data.get("team_name"):
+        await interaction.response.send_message(f"❌ {membre.display_name} est déjà dans une équipe.", ephemeral=True)
+        return
+
+    if membre.id in team_data.get("members", []):
+        await interaction.response.send_message(f"❌ {membre.display_name} est déjà dans ton équipe.", ephemeral=True)
+        return
+
+    # Ajouter le membre
+    team_data.setdefault("members", []).append(membre.id)
+    target_data["team_name"] = team_name
+    save_data(db)
+
+    await interaction.response.send_message(f"✅ {membre.mention} a été ajouté à l'équipe **{team_name}**.", ephemeral=True)
+
+
+@team_group.command(name="remove", description="Retire un membre ou dissout l'équipe si tu es le créateur.")
+@app_commands.describe(membre="Le membre à retirer (optionnel, si créateur).")
+async def team_remove(interaction: discord.Interaction, membre: Optional[discord.Member] = None):
+    user_data = get_user_xp_data(interaction.user.id)
+    team_name = user_data.get("team_name")
+    if not team_name:
+        await interaction.response.send_message("❌ Tu n'es dans aucune équipe.", ephemeral=True)
+        return
+
+    team_data = db.get("teams", {}).get(team_name)
+    if not team_data: 
+        user_data["team_name"] = None
+        save_data(db)
+        await interaction.response.send_message("❌ Erreur : Ton équipe n'existe plus. Ton statut a été réinitialisé.", ephemeral=True)
+        return
+
+    is_creator = team_data.get("creator_id") == interaction.user.id
+
+    if membre: # Action de retirer un membre (par le créateur)
+        if not is_creator:
+            await interaction.response.send_message("❌ Seul le créateur peut retirer des membres.", ephemeral=True)
+            return
+        if membre.id == interaction.user.id:
+            await interaction.response.send_message("❌ Le créateur ne peut pas se retirer. Utilise `/team remove` sans argument pour dissoudre.", ephemeral=True)
+            return
+        if membre.id not in team_data.get("members", []):
+            await interaction.response.send_message(f"❌ {membre.display_name} n'est pas dans ton équipe.", ephemeral=True)
+            return
+
+        # Retirer le membre
+        team_data["members"].remove(membre.id)
+        target_data = get_user_xp_data(membre.id)
+        target_data["team_name"] = None
+        save_data(db)
+        await interaction.response.send_message(f"👢 {membre.mention} a été retiré de l'équipe **{team_name}**.", ephemeral=True)
+
+    elif is_creator: # Action de dissoudre (par le créateur)
+        # Informer les membres et réinitialiser leur statut
+        member_ids = team_data.get("members", [])
+        for mid in member_ids:
+            member_data = get_user_xp_data(mid)
+            member_data["team_name"] = None
+        
+        # Supprimer la team
+        del db["teams"][team_name]
+        save_data(db)
+        await interaction.response.send_message(f"💥 L'équipe **{team_name}** a été dissoute.", ephemeral=True)
+
+    else: # Action de quitter (par un membre non-créateur)
+        if interaction.user.id in team_data.get("members", []): 
+            team_data["members"].remove(interaction.user.id)
+        user_data["team_name"] = None
+        save_data(db)
+        await interaction.response.send_message(f"👋 Tu as quitté l'équipe **{team_name}**.", ephemeral=True)
+
+
+@team_group.command(name="set_logo", description="Définit le logo de ton équipe (URL).")
+@app_commands.describe(url="L'URL de l'image pour le logo.")
+async def team_set_logo(interaction: discord.Interaction, url: str):
+    user_data = get_user_xp_data(interaction.user.id)
+    team_name = user_data.get("team_name")
+    if not team_name: return await interaction.response.send_message("❌ Tu n'es dans aucune équipe.", ephemeral=True)
+    team_data = db.get("teams", {}).get(team_name)
+    if not team_data or team_data.get("creator_id") != interaction.user.id: return await interaction.response.send_message("❌ Seul le créateur peut définir le logo.", ephemeral=True)
+
+    if not url.startswith(("http://", "https://")):
+        return await interaction.response.send_message("❌ URL invalide.", ephemeral=True)
+
+    team_data["logo_url"] = url
+    save_data(db)
+    await interaction.response.send_message(f"🖼️ Logo de l'équipe **{team_name}** mis à jour.", ephemeral=True)
+
+
+@team_group.command(name="set_role", description="Définit un rôle associé à l'équipe.")
+@app_commands.describe(role="Le rôle à associer à l'équipe.")
+async def team_set_role(interaction: discord.Interaction, role: discord.Role):
+    user_data = get_user_xp_data(interaction.user.id)
+    team_name = user_data.get("team_name")
+    if not team_name: return await interaction.response.send_message("❌ Tu n'es dans aucune équipe.", ephemeral=True)
+    team_data = db.get("teams", {}).get(team_name)
+    if not team_data or team_data.get("creator_id") != interaction.user.id: return await interaction.response.send_message("❌ Seul le créateur peut définir le rôle.", ephemeral=True)
+
+    team_data["role_id"] = role.id
+    save_data(db)
+    await interaction.response.send_message(f"🏷️ Rôle associé à l'équipe **{team_name}** défini sur {role.mention}.", ephemeral=True)
+
+
+@team_group.command(name="set_color", description="Définit la couleur de l'embed de l'équipe (#RRGGBB).")
+@app_commands.describe(couleur="La couleur hexadécimale (ex: #6441a5).")
+async def team_set_color(interaction: discord.Interaction, couleur: str):
+    user_data = get_user_xp_data(interaction.user.id)
+    team_name = user_data.get("team_name")
+    if not team_name: return await interaction.response.send_message("❌ Tu n'es dans aucune équipe.", ephemeral=True)
+    team_data = db.get("teams", {}).get(team_name)
+    if not team_data or team_data.get("creator_id") != interaction.user.id: return await interaction.response.send_message("❌ Seul le créateur peut définir la couleur.", ephemeral=True)
+
+    if not re.match(r"^#(?:[0-9a-fA-F]{3}){1,2}$", couleur):
+        return await interaction.response.send_message("❌ Format de couleur invalide. Utilise #RRGGBB.", ephemeral=True)
+
+    team_data["color_hex"] = couleur
+    save_data(db)
+    await interaction.response.send_message(f"🎨 Couleur de l'équipe **{team_name}** mise à jour.", ephemeral=True)
+
+
+@team_group.command(name="info", description="Affiche les informations d'une équipe.")
+@app_commands.describe(nom="Le nom de l'équipe (optionnel, affiche la tienne sinon).")
+@app_commands.autocomplete(nom=team_autocomplete)
+async def team_info(interaction: discord.Interaction, nom: Optional[str] = None):
+    target_team_name = nom
+    if not target_team_name:
+        user_data = get_user_xp_data(interaction.user.id)
+        target_team_name = user_data.get("team_name")
+        if not target_team_name:
+            return await interaction.response.send_message("❌ Tu n'es dans aucune équipe. Spécifie un nom.", ephemeral=True)
+
+    team_data = db.get("teams", {}).get(target_team_name)
+    if not team_data:
+        return await interaction.response.send_message(f"❌ L'équipe **{target_team_name}** n'existe pas.", ephemeral=True)
+
+    creator_mention_str = "`Inconnu`"
+    if team_data.get("creator_id"):
+        try:
+            creator = await client.fetch_user(team_data.get("creator_id"))
+            creator_mention_str = creator.mention
+        except (discord.NotFound, discord.HTTPException):
+             logger.warning(f"Impossible de fetch le créateur de team ID: {team_data.get('creator_id')}")
+             creator_mention_str = f"`ID:{team_data.get('creator_id')}`"
+
+
+    member_ids = team_data.get("members", [])
+    members_mentions = []
+    for mid in member_ids:
+        member = interaction.guild.get_member(mid)
+        members_mentions.append(member.mention if member else f"`ID:{mid}`")
+
+    role = interaction.guild.get_role(team_data.get("role_id", 0))
+    color = get_team_color(team_data)
+
+    embed = discord.Embed(
+        title=f"🔰 Infos Équipe : {target_team_name}",
+        color=color
+    )
+    if team_data.get("logo_url"):
+        embed.set_thumbnail(url=team_data["logo_url"])
+
+    embed.add_field(name="👑 Créateur", value=creator_mention_str, inline=True)
+    embed.add_field(name="👥 Membres", value=str(len(member_ids)), inline=True)
+    embed.add_field(name="🏷️ Rôle Associé", value=role.mention if role else "`Aucun`", inline=True)
+
+    members_str = ", ".join(members_mentions)
+    if len(members_str) > 1020: members_str = members_str[:1020] + "..." 
+    embed.add_field(name="📜 Liste des Membres", value=members_str if members_str else "`Aucun`", inline=False)
+    
+    embed = apply_embed_styles(embed, "team_info") 
+    await interaction.response.send_message(embed=embed)
+
+
+@client.tree.command(name="teamlist", description="Affiche la liste de toutes les équipes.")
+async def teamlist(interaction: discord.Interaction):
+    teams = db.get("teams", {})
+    if not teams:
+        return await interaction.response.send_message("Aucune équipe créée pour le moment.", ephemeral=True)
+
+    embed = discord.Embed(title="📋 Liste des Équipes", color=TEAM_COLOR)
+    description = ""
+    sorted_teams = sorted(teams.items())
+
+    for name, data in sorted_teams:
+        creator_id = data.get("creator_id")
+        creator_mention = f"<@{creator_id}>" if creator_id else "`Inconnu`"
+        member_count = len(data.get("members", []))
+        description += f"• **{name}** (Créateur: {creator_mention}) - {member_count} membre{'s' if member_count != 1 else ''}\n"
+        if len(description) > 3900: 
+            description += "\n*... et plus encore.*"
+            break
+
+    embed.description = description
+    await interaction.response.send_message(embed=embed)
+
+client.tree.add_command(team_group)
+
+# ==================================================================================================
+# 14. SYSTÈME D'AVATAR DYNAMIQUE
+# ==================================================================================================
+
+async def fetch_image_bytes(url: str) -> Optional[bytes]:
+    """Télécharge une image depuis une URL et retourne les bytes."""
+    if not url or not url.startswith(('http://', 'https://')):
+        logger.error(f"Avatar Fetch: URL invalide ou manquante: {url}")
+        return None
+    
+    image_bytes = await fetch_url(url, response_type='bytes')
+    if not image_bytes:
+        logger.error(f"Avatar Fetch: Impossible de télécharger l'image pour {url}")
+        return None
+    return image_bytes
+
+
+async def trigger_avatar_change(trigger_key: str, force: bool = False):
+    """Logique principale pour gérer les changements d'avatar."""
+    if not db['settings'].get('avatar_enabled', True):
+        logger.debug(f"Avatar: Changement pour '{trigger_key}' ignoré (Système désactivé).")
+        return
+
+    now_utc = get_adjusted_time()
+
+    if not force:
+        last_change_str = db['settings'].get('avatar_last_changed')
+        if last_change_str:
+            try:
+                last_change_time = datetime.datetime.fromisoformat(last_change_str).replace(tzinfo=SERVER_TIMEZONE)
+                cooldown_seconds = db['settings'].get('avatar_cooldown_seconds', 300)
+                if now_utc < last_change_time + datetime.timedelta(seconds=cooldown_seconds):
+                    logger.info(f"Avatar: Changement pour '{trigger_key}' ignoré (Cooldown global actif).")
+                    return
+            except ValueError:
+                logger.error(f"Avatar: Timestamp 'avatar_last_changed' invalide: {last_change_str}")
+                db['settings']['avatar_last_changed'] = None
+
+    trigger_config = db.get('avatar_triggers', {}).get(trigger_key)
+    if not trigger_config or not trigger_config.get('image_url'):
+        logger.debug(f"Avatar: Déclencheur '{trigger_key}' non configuré ou sans image URL.")
+        default_url = db['settings'].get('avatar_default_url')
+        if default_url and trigger_key != 'default':
+            logger.debug(f"Avatar: Utilisation de l'avatar par défaut car '{trigger_key}' n'est pas configuré.")
+            await trigger_avatar_change('default', force=force)
+        return
+
+    image_url = trigger_config['image_url']
+    duration_str = trigger_config.get('duration', '0s')
+    duration_delta = parse_duration(duration_str)
+    if not isinstance(duration_delta, datetime.timedelta):
+        logger.error(f"Avatar: Durée invalide '{duration_str}' pour trigger '{trigger_key}'. Utilisation de 0s.")
+        duration_delta = datetime.timedelta(seconds=0)
+
+    current_avatar_url = client.user.avatar.url if client.user.avatar else db['settings'].get('avatar_default_url')
+
+    image_bytes = await fetch_image_bytes(image_url)
+    if not image_bytes:
+        logger.error(f"Avatar: Impossible de télécharger l'image pour '{trigger_key}' depuis {image_url}.")
+        return
+
+    try:
+        await client.user.edit(avatar=image_bytes)
+        logger.info(f"Avatar: Changé pour le déclencheur '{trigger_key}'.")
+
+        revert_time_iso = (now_utc + duration_delta).isoformat() if duration_delta.total_seconds() > 0 else None
+        avatar_stack = db.setdefault('avatar_stack', [])
+        avatar_stack.insert(0, {
+            'trigger': trigger_key,
+            'image_url': image_url,
+            'revert_time': revert_time_iso,
+            'previous_avatar_url': current_avatar_url
+        })
+        db['avatar_stack'] = avatar_stack[:10]
+        db['settings']['avatar_last_changed'] = now_utc.isoformat()
+        save_data(db)
+
+    except discord.errors.HTTPException as e:
+        if e.status == 429:
+            retry_after = e.retry_after or 60
+            logger.warning(f"Avatar: Rate limit atteint. Prochain changement possible dans {retry_after:.2f}s.")
+        else:
+            logger.error(f"Avatar: Erreur HTTP lors du changement d'avatar: {e.status} - {e.text}")
+    except Exception as e:
+        logger.exception(f"Avatar: Erreur inattendue lors du changement d'avatar: {e}")
+
+
+async def revert_avatar():
+    """Restaure l'avatar précédent depuis la pile."""
+    avatar_stack = db.get('avatar_stack', [])
+    if not avatar_stack:
+        logger.debug("Avatar Revert: Pile vide, rien à restaurer.")
+        return
+    avatar_stack.pop(0)
+    target_state = avatar_stack[0] if avatar_stack else None
+    target_url = target_state['image_url'] if target_state else db['settings'].get('avatar_default_url')
+    logger.info(f"Avatar Revert: Tentative de restauration vers {'l\'état précédent (' + target_state['trigger'] + ')' if target_state else 'l\'avatar par défaut'}.")
+    if target_url:
+        image_bytes = await fetch_image_bytes(target_url)
+        if image_bytes:
+            try:
+                await client.user.edit(avatar=image_bytes)
+                logger.info(f"Avatar Revert: Avatar restauré avec succès.")
+            except discord.errors.HTTPException as e:
+                logger.error(f"Avatar Revert: Erreur HTTP lors de la restauration: {e.status} - {e.text}")
+            except Exception as e:
+                logger.exception(f"Avatar Revert: Erreur inattendue lors de la restauration: {e}")
+        else:
+            logger.error(f"Avatar Revert: Impossible de télécharger l'image précédente/défaut depuis {target_url}.")
+            try:
+                await client.user.edit(avatar=None)
+                logger.warning("Avatar Revert: Image précédente/défaut introuvable, avatar retiré.")
+            except Exception: pass
+    else:
+        try:
+            await client.user.edit(avatar=None)
+            logger.info("Avatar Revert: Pile vide et pas de défaut, avatar retiré.")
+        except discord.errors.HTTPException as e:
+            logger.error(f"Avatar Revert: Erreur HTTP lors de la suppression de l'avatar: {e.status} - {e.text}")
+        except Exception as e:
+            logger.exception(f"Avatar Revert: Erreur inattendue lors de la suppression de l'avatar: {e}")
+    db['avatar_stack'] = avatar_stack
+    save_data(db)
+
+
+def parse_duration(duration_str: str) -> datetime.timedelta:
+    """Parse une chaîne de durée comme '5m', '1h', '2d' en timedelta."""
+    duration_str = duration_str.lower().strip()
+    if not re.match(r"^\d+[smhd]$", duration_str):
+        return datetime.timedelta(seconds=0)
+    num = int(duration_str[:-1])
+    unit = duration_str[-1]
+    if unit == 's': return datetime.timedelta(seconds=num)
+    elif unit == 'm': return datetime.timedelta(minutes=num)
+    elif unit == 'h': return datetime.timedelta(hours=num)
+    elif unit == 'd': return datetime.timedelta(days=num)
+    return datetime.timedelta(seconds=0)
+
+
+avatar_group = app_commands.Group(name="avatar", description="Gère le système d'avatar dynamique.")
+avatar_config_group = app_commands.Group(name="config", description="Configure le système d'avatar.", parent=avatar_group, default_permissions=discord.Permissions(administrator=True))
+AVATAR_TRIGGERS_MAP = {
+    'xp_gain': 'Gain XP/Level Up',
+    'member_join': 'Arrivée Membre',
+    'member_remove': 'Départ Membre',
+    'default': 'Défaut'
+}
+
+class AvatarCooldownModal(Modal, title="Définir Cooldown Avatar"):
+    cooldown_input = TextInput(label="Cooldown (secondes)", default=str(db['settings'].get('avatar_cooldown_seconds', 300)))
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            cooldown = int(self.cooldown_input.value)
+            if cooldown < 0: raise ValueError("Doit être positif")
+            db['settings']['avatar_cooldown_seconds'] = cooldown
+            save_data(db)
+            await interaction.response.send_message(f"✅ Cooldown global défini à {cooldown}s.", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ Entrez un nombre de secondes valide (>= 0).", ephemeral=True)
+
+class AvatarDefaultModal(Modal, title="Définir Avatar par Défaut"):
+    url_input = TextInput(label="URL de l'image (laisser vide pour supprimer)", required=False, default=db['settings'].get('avatar_default_url', ''))
+    async def on_submit(self, interaction: discord.Interaction):
+        url = self.url_input.value.strip() or None
+        db['settings']['avatar_default_url'] = url
+        save_data(db)
+        message = "✅ Avatar par défaut mis à jour." if url else "🗑️ Avatar par défaut supprimé."
+        await interaction.response.send_message(message, ephemeral=True)
+
+class AvatarTriggerModal(Modal):
+    def __init__(self, trigger_key: str):
+        super().__init__(title=f"Configurer Trigger: {AVATAR_TRIGGERS_MAP.get(trigger_key, trigger_key)}")
+        self.trigger_key = trigger_key
+        trigger_data = db.get('avatar_triggers', {}).get(trigger_key, {})
+        self.add_item(TextInput(label="URL de l'image (laisser vide pour supprimer)", required=False, default=trigger_data.get('image_url', '')))
+        self.add_item(TextInput(label="Durée avant retour (ex: 5m, 1h, 0s)", default=trigger_data.get('duration', '0s')))
+    async def on_submit(self, interaction: discord.Interaction):
+        image_url = self.children[0].value.strip() or None
+        duration_str = self.children[1].value.strip() or '0s'
+        if not image_url:
+            if self.trigger_key in db.get('avatar_triggers', {}):
+                del db['avatar_triggers'][self.trigger_key]
+                message = f"🗑️ Déclencheur '{self.trigger_key}' supprimé."
+            else:
+                message = f"ℹ️ Déclencheur '{self.trigger_key}' n'existait pas."
+        else:
+            if not re.match(r"^\d+[smhd]$", duration_str.lower()) and duration_str != '0s':
+                await interaction.response.send_message("❌ Format de durée invalide. Utilisez Xm, Xh, Xd ou 0s.", ephemeral=True)
+                return
+            db.setdefault('avatar_triggers', {})[self.trigger_key] = {'image_url': image_url, 'duration': duration_str}
+            message = f"✅ Déclencheur '{self.trigger_key}' configuré."
+        save_data(db)
+        await interaction.response.send_message(message, ephemeral=True)
+
+class AvatarTriggerSelect(Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=display, value=key, description=f"Clé: {key}")
+            for key, display in AVATAR_TRIGGERS_MAP.items()
+        ]
+        custom_keys = [k for k in db.get('avatar_triggers', {}) if k not in AVATAR_TRIGGERS_MAP]
+        for key in custom_keys:
+            options.append(discord.SelectOption(label=f"Custom: {key}", value=key, description=f"Clé: {key}"))
+        super().__init__(placeholder="Choisir un déclencheur à configurer...", options=options)
+    async def callback(self, interaction: discord.Interaction):
+        trigger_key = self.values[0]
+        await interaction.response.send_modal(AvatarTriggerModal(trigger_key))
+
+class AvatarConfigView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.update_toggle_button()
+        self.add_item(AvatarTriggerSelect())
+    def update_toggle_button(self):
+        for item in self.children[:]:
+            if getattr(item, 'custom_id', None) == 'toggle_avatar_system':
+                self.remove_item(item)
+        is_enabled = db['settings'].get('avatar_enabled', True)
+        label = "Désactiver Système" if is_enabled else "Activer Système"
+        style = discord.ButtonStyle.danger if is_enabled else discord.ButtonStyle.success
+        emoji = "✅" if is_enabled else "❌"
+        toggle_button = Button(label=label, style=style, emoji=emoji, custom_id="toggle_avatar_system", row=2)
+        toggle_button.callback = self.toggle_system
+        self.add_item(toggle_button)
+    async def toggle_system(self, interaction: discord.Interaction):
+        is_enabled = db['settings'].get('avatar_enabled', True)
+        db['settings']['avatar_enabled'] = not is_enabled
+        save_data(db)
+        self.update_toggle_button()
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(f"Système d'avatar maintenant {'activé' if not is_enabled else 'désactivé'}.", ephemeral=True)
+    @discord.ui.button(label="Définir Cooldown", style=discord.ButtonStyle.secondary, emoji="⏳", row=1)
+    async def set_cooldown(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(AvatarCooldownModal())
+    @discord.ui.button(label="Définir Défaut", style=discord.ButtonStyle.secondary, emoji="🖼️", row=1)
+    async def set_default(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(AvatarDefaultModal())
+
+@avatar_config_group.command(name="panel", description="Ouvre le panneau de configuration de l'avatar.")
+async def avatar_config_panel(interaction: discord.Interaction):
+    status = "Activé" if db['settings'].get('avatar_enabled', True) else "Désactivé"
+    cooldown = db['settings'].get('avatar_cooldown_seconds', 300)
+    default_url = db['settings'].get('avatar_default_url', 'Non défini')
+    embed = discord.Embed(title="⚙️ Config Avatar Dynamique", description=f"**État :** {status} | **Cooldown :** {cooldown}s\n**Défaut :** {default_url}", color=NEON_BLUE)
+    embed.add_field(name="Instructions", value="• Utilisez les boutons pour activer/désactiver, définir le cooldown ou l'avatar par défaut.\n• Utilisez le menu déroulant pour configurer l'image et la durée de chaque déclencheur.", inline=False)
+    await interaction.response.send_message(embed=embed, view=AvatarConfigView(), ephemeral=True)
+
+client.tree.add_command(avatar_group)
+
+# ==================================================================================================
+# 15. SYSTÈME TOPWEEK
+# ==================================================================================================
+topweek_admin_group = app_commands.Group(name="topweekadmin", description="[Admin] Gère le classement hebdomadaire.", default_permissions=discord.Permissions(administrator=True))
+
+@topweek_admin_group.command(name="config", description="Configure l'annonce du classement hebdo.")
+@app_commands.describe(
+    salon="Le salon où poster l'annonce.",
+    jour="Le jour de l'annonce (0=Lundi, 6=Dimanche).",
+    heure="L'heure de l'annonce en UTC (HH:MM)."
+)
+async def topweek_config(interaction: discord.Interaction, salon: discord.TextChannel, jour: app_commands.Range[int, 0, 6], heure: str):
+    try:
+        time_obj = datetime.datetime.strptime(heure.strip(), "%H:%M").time()
+    except ValueError:
+        return await interaction.response.send_message("❌ Format d'heure invalide. Utilisez `HH:MM` (ex: 19:00).", ephemeral=True)
+    settings = db.setdefault("settings", {}).setdefault("topweek_settings", {})
+    settings["channel_id"] = salon.id
+    settings["announcement_day"] = jour
+    settings["announcement_time"] = time_obj.strftime("%H:%M")
+    save_data(db)
+    jours_semaine = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+    await interaction.response.send_message(f"✅ Annonce TopWeek configurée pour {salon.mention}, chaque **{jours_semaine[jour]}** à **{heure} UTC**.", ephemeral=True)
+
+client.tree.add_command(topweek_admin_group)
+
+# --- Commandes Admin XP ---
+adminxp_group = app_commands.Group(name="adminxp", description="Commandes admin pour gérer l'XP des joueurs.", default_permissions=discord.Permissions(administrator=True))
+
+@adminxp_group.command(name="give", description="Donne/Retire de l'XP à un joueur.")
+@app_commands.describe(membre="Le membre concerné.", montant="Quantité d'XP (+/-).", raison="Motif.")
+async def adminxp_give(interaction: discord.Interaction, membre: discord.Member, montant: int, raison: str):
+    if membre.bot: return await interaction.response.send_message("❌ Pas d'XP pour les bots.", ephemeral=True)
+
+    await update_user_xp(membre.id, montant, is_weekly_xp=(montant > 0)) 
+    save_data(db)
+    await check_and_handle_progression(membre, interaction.channel) 
+
+    await interaction.response.send_message(f"✅ {montant:+d} XP ajusté pour {membre.mention}. Raison: {raison}", ephemeral=True)
+
+@adminxp_group.command(name="setlevel", description="Définit directement le niveau d'un joueur.")
+@app_commands.describe(membre="Le membre concerné.", niveau="Le nouveau niveau (XP sera mis à 0).")
+async def adminxp_setlevel(interaction: discord.Interaction, membre: discord.Member, niveau: app_commands.Range[int, 1]):
+    if membre.bot: return await interaction.response.send_message("❌ Pas de niveau pour les bots.", ephemeral=True)
+
+    user_data = get_user_xp_data(membre.id)
+    user_data["level"] = niveau
+    user_data["xp"] = 0 
+    user_data["weekly_xp"] = 0 
+    save_data(db)
+
+    await interaction.response.send_message(f"✅ Niveau de {membre.mention} défini sur **{niveau}** (XP réinitialisé).", ephemeral=True)
+
+@adminxp_group.command(name="resetweekly", description="Réinitialise l'XP hebdomadaire de tous les joueurs.")
+async def adminxp_resetweekly(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    count = 0
+    for user_id, user_data in db.get("users", {}).items():
+        if user_data.get("weekly_xp", 0) != 0:
+            user_data["weekly_xp"] = 0
+            count += 1
+    if count > 0:
+        save_data(db)
+    await interaction.followup.send(f"✅ XP hebdomadaire réinitialisé pour {count} joueur(s).", ephemeral=True)
+
+client.tree.add_command(adminxp_group)
+
+
+# Commande Config Listener
+@client.tree.command(name="config_listener", description="[Admin] Configure les salons d'écoute des bots Mod/Event.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    mod_channel="Salon des logs du bot de modération.",
+    event_channel="Salon des annonces du bot d'événements.",
+    activer="Activer ou désactiver l'écoute."
+)
+async def config_listener(
+    interaction: discord.Interaction,
+    mod_channel: Optional[discord.TextChannel] = None,
+    event_channel: Optional[discord.TextChannel] = None,
+    activer: Optional[bool] = None
+):
+    settings = db.setdefault("settings", {}).setdefault("mod_listener_settings", {})
+    changes = []
+    if mod_channel is not None:
+        settings["mod_bot_channel_id"] = mod_channel.id
+        changes.append(f"Salon Mod défini sur {mod_channel.mention}")
+    if event_channel is not None:
+        settings["event_bot_channel_id"] = event_channel.id
+        changes.append(f"Salon Event défini sur {event_channel.mention}")
+    if activer is not None:
+        settings["enabled"] = activer
+        changes.append(f"Écoute {'activée' if activer else 'désactivée'}")
+
+    if not changes:
+        mod_ch_id = settings.get("mod_bot_channel_id")
+        ev_ch_id = settings.get("event_bot_channel_id")
+        mod_ch = client.get_channel(mod_ch_id) if mod_ch_id else None
+        ev_ch = client.get_channel(ev_ch_id) if ev_ch_id else None
+        status = "Activée" if settings.get("enabled", True) else "Désactivée"
+        await interaction.response.send_message(
+            f"**Configuration Écoute Bots:**\n"
+            f"• Statut: `{status}`\n"
+            f"• Salon Mod: {mod_ch.mention if mod_ch else '`Non défini`'}\n"
+            f"• Salon Event: {ev_ch.mention if ev_ch else '`Non défini`'}",
+            ephemeral=True
+        )
+    else:
+        save_data(db)
+        await interaction.response.send_message("✅ Configuration de l'écoute mise à jour:\n• " + "\n• ".join(changes), ephemeral=True)
+
+# --- NOUVEAU: Commande pour réinitialiser le Listener (Désactiver et vider les salons) ---
+@client.tree.command(name="reset_listener", description="[Admin] Désactive l'écoute des bots et supprime les salons configurés.")
+@app_commands.default_permissions(administrator=True)
+async def reset_listener(interaction: discord.Interaction):
+    settings = db.setdefault("settings", {}).setdefault("mod_listener_settings", {})
+    settings["mod_bot_channel_id"] = None
+    settings["event_bot_channel_id"] = None
+    settings["enabled"] = False
+    save_data(db)
+    await interaction.response.send_message("✅ Écoute des bots désactivée et configuration des salons supprimée.", ephemeral=True)
+
+# Commande /rewards (pour config level up)
+@client.tree.command(name="rewards", description="[Admin] Configure les récompenses de montée de niveau.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    salon_notif="Salon pour annoncer les level up (optionnel).",
+    niveau="Niveau requis pour le rôle (optionnel).",
+    role="Rôle à attribuer à ce niveau (optionnel)."
+)
+async def rewards(interaction: discord.Interaction, salon_notif: Optional[discord.TextChannel] = None, niveau: Optional[app_commands.Range[int, 1]] = None, role: Optional[discord.Role] = None):
+    
+    settings = db.setdefault("settings", {}).setdefault("level_up_rewards", {})
+    changes = []
+
+    if salon_notif:
+        settings["notification_channel_id"] = salon_notif.id
+        changes.append(f"Salon d'annonce défini sur {salon_notif.mention}")
+
+    if niveau and role:
+        settings.setdefault("role_rewards", {})[str(niveau)] = str(role.id)
+        changes.append(f"Récompense de niveau {niveau} définie sur {role.mention}")
+    elif niveau or role:
+        await interaction.response.send_message("❌ Pour ajouter une récompense de rôle, tu dois fournir **à la fois** le niveau et le rôle.", ephemeral=True)
+        return
+
+    if not changes:
+        await interaction.response.send_message("ℹ️ Aucune modification effectuée. Fournis un salon, ou un duo niveau/rôle.", ephemeral=True)
+    else:
+        save_data(db)
+        await interaction.response.send_message(f"✅ Configuration des récompenses mise à jour:\n• " + "\n• ".join(changes), ephemeral=True)
+
+
+# --- NOUVEAU: Commande de Synchronisation Manuelle ---
+@client.tree.command(name="admin_sync", description="[Admin] Force la synchronisation des commandes avec Discord.")
+@app_commands.default_permissions(administrator=True)
+async def admin_sync(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        synced = await client.tree.sync()
+        command_names = [c.name for c in synced]
+        await interaction.followup.send(f"✅ **Synchronisation réussie !**\n**{len(synced)} commandes actives :**\n`{', '.join(command_names)}`", ephemeral=True)
+    except Exception as e:
+        logger.exception(f"Erreur Sync Manuelle: {e}")
+        await interaction.followup.send(f"❌ Erreur lors de la synchronisation : `{e}`", ephemeral=True)
+
+# ==================================================================================================
+# 14. SYSTÈME D'AVATAR DYNAMIQUE (Suite)
+# ==================================================================================================
+
+# Tâche de fond de vérification de réversion d'avatar
+@tasks.loop(seconds=5)
+async def check_avatar_revert():
+    """Vérifie périodiquement si un avatar temporaire doit être restauré."""
+    await client.wait_until_ready()
+    avatar_stack = db.get('avatar_stack', [])
+    if not avatar_stack: return
+    now_utc = get_adjusted_time()
+    current_state = avatar_stack[0]
+    revert_time_iso = current_state.get('revert_time')
+    if revert_time_iso:
+        try:
+            revert_time = datetime.datetime.fromisoformat(revert_time_iso).replace(tzinfo=SERVER_TIMEZONE)
+            if now_utc >= revert_time:
+                logger.info(f"Avatar Check: Temps de réversion atteint pour trigger '{current_state.get('trigger')}'. Restauration...")
+                await revert_avatar()
+        except ValueError:
+            logger.error(f"Avatar Check: Timestamp 'revert_time' invalide dans la pile: {revert_time_iso}")
+
+# ==================================================================================================
+# 15. SYSTÈME TOPWEEK (Suite)
+# ==================================================================================================
+
+# --- Tâches Topweek ---
+@tasks.loop(time=datetime.time(hour=0, minute=0, second=5, tzinfo=SERVER_TIMEZONE))
+async def weekly_xp_reset():
+    """Réinitialise l'XP hebdomadaire si c'est lundi (début de semaine)."""
+    await client.wait_until_ready()
+    # weekday() -> Lundi=0, Dimanche=6
+    if get_adjusted_time().weekday() == 0: 
+        logger.info("Réinitialisation de l'XP hebdomadaire.")
+        modified = False
+        for user_id, user_data in db.get("users", {}).items():
+            if user_data.get("weekly_xp", 0) != 0:
+                user_data["weekly_xp"] = 0
+                modified = True
+        if modified:
+            save_data(db)
+            logger.info("XP hebdomadaire réinitialisée pour tous les joueurs actifs.")
+        else:
+            logger.info("Aucun XP hebdomadaire à réinitialiser.")
 
 @tasks.loop(hours=1)
-async def post_weekly_leaderboard(client_ref: discord.Client):
-    await client_ref.wait_until_ready()
-    settings = db["settings"].get("topweek_settings", {})
-    cid = settings.get("channel_id")
-    if not cid: return
-    
+async def post_weekly_leaderboard():
+    """Poste le classement hebdomadaire à l'heure configurée."""
+    await client.wait_until_ready()
+    settings = db.get("settings", {}).get("topweek_settings", {})
     now = get_adjusted_time()
-    if now.weekday() != settings.get("announcement_day", 6): return
-    target_hm = settings.get("announcement_time", "19:00")
-    if now.strftime("%H:%M") != target_hm: return
+    channel_id = settings.get("channel_id")
+    announcement_day = settings.get("announcement_day", 6)
+    announcement_time_str = settings.get("announcement_time", "19:00")
+    if not channel_id or now.weekday() != announcement_day:
+        return
+    try:
+        announcement_time = datetime.datetime.strptime(announcement_time_str, "%H:%M").time()
+    except ValueError:
+        logger.error(f"TopWeek: Heure d'annonce invalide: {announcement_time_str}")
+        return
+    if now.time().hour != announcement_time.hour or now.time().minute < announcement_time.minute:
+        return
+    current_week_str = now.strftime('%Y-%U')
+    if settings.get("last_posted_week") == current_week_str:
+        logger.debug(f"TopWeek: Classement déjà posté pour la semaine {current_week_str}.")
+        return
+
+    channel = client.get_channel(channel_id)
+    if not channel:
+        logger.error(f"TopWeek: Salon d'annonce introuvable (ID: {channel_id}).")
+        return
     
-    week_id = now.strftime('%Y-%U')
-    if settings.get("last_posted_week") == week_id: return
-
-    channel = client_ref.get_channel(cid)
-    if not channel: return
-
-    players = {u: d for u, d in db.get("users", {}).items() if d.get("weekly_xp", 0) > 0}
-    if not players:
-        settings["last_posted_week"] = week_id
+    logger.info(f"TopWeek: Publication du classement hebdomadaire dans #{channel.name}...")
+    all_users_data = db.get("users", {})
+    weekly_players = {uid: data for uid, data in all_users_data.items() if data.get("weekly_xp", 0) > 0}
+    if not weekly_players:
+        logger.info("TopWeek: Classement vide, rien à poster.")
+        db["settings"]["topweek_settings"]["last_posted_week"] = current_week_str
         save_data(db)
         return
 
-    top = sorted(players.items(), key=lambda x: x[1].get("weekly_xp", 0), reverse=True)[:3]
-    embed = discord.Embed(title="🏆 Palmarès Hebdomadaire ! 🏆", description="Bravo aux meilleurs joueurs de la semaine !", color=GOLD_COLOR)
-    
-    rewards = settings.get("rewards", {})
-    reward_keys = ["first", "second", "third"]
-    
+    leaderboard = sorted(weekly_players.items(), key=lambda item: item[1].get("weekly_xp", 0), reverse=True)
+    embed = discord.Embed(title="🏆 Palmarès Hebdomadaire Terminé ! 🏆", description="Félicitations aux joueurs les plus actifs de la semaine passée !", color=GOLD_COLOR)
     lines = []
-    for i, (uid, data) in enumerate(top):
-        member = channel.guild.get_member(int(uid))
-        name = member.display_name if member else "Joueur parti"
-        lines.append(f"{LEADERBOARD_EMOJIS[i]} **{name}** - `{data['weekly_xp']}` XP")
-        
-        bonus = rewards.get(reward_keys[i], {}).get("xp", 0)
-        if bonus > 0:
-            await update_user_xp(int(uid), bonus, False)
-            if member: await check_and_handle_progression(member, channel)
-
+    rewards_config = settings.get("rewards", {})
+    reward_winners = {}
+    for i, (user_id_str, data) in enumerate(leaderboard[:3]):
+        try:
+            user_id = int(user_id_str)
+            member = channel.guild.get_member(user_id)
+            name = member.display_name if member else f"ID:{user_id_str}"
+            xp_hebdo = data.get('weekly_xp', 0)
+            lines.append(f"{LEADERBOARD_EMOJIS[i]} **{name}** - `{xp_hebdo:,}` XP")
+            if i == 0: reward = rewards_config.get("first", {}).get("xp", 0)
+            elif i == 1: reward = rewards_config.get("second", {}).get("xp", 0)
+            else: reward = rewards_config.get("third", {}).get("xp", 0)
+            if reward > 0:
+                reward_winners[user_id] = {"xp": reward}
+        except (ValueError, AttributeError):
+            continue
     embed.description += "\n\n" + "\n".join(lines)
-    embed = apply_embed_styles(embed, "topweek_announce")
-    await channel.send(embed=embed)
+    embed.set_footer(text="L'XP hebdomadaire sera réinitialisée. Préparez-vous pour la nouvelle semaine !")
+    embed = apply_embed_styles(embed, "topweek_announce") 
     
-    settings["last_posted_week"] = week_id
-    save_data(db)
-
-@tasks.loop(hours=6)
-async def backup_xp_data(client_ref: discord.Client):
     try:
-        backup = {u: {"xp": d.get("xp"), "level": d.get("level")} for u, d in db.get("users", {}).items()}
-        with open(XP_BACKUP_FILE, 'w') as f: json.dump({"timestamp": get_adjusted_time().isoformat(), "users": backup}, f)
-    except: pass
-
-
-# ==================================================================================================
-# 16. SYSTÈME VOCAL (INTERFACE & LOGIQUE UI)
-# ==================================================================================================
-
-# --- Utilitaire de nettoyage JSON (Local) ---
-def sanitize_voice_json(data):
-    """Nettoie le JSON pour éviter les erreurs d'URL vides."""
-    if not isinstance(data, dict): return data
-    if 'thumbnail' in data and not data['thumbnail'].get('url'): del data['thumbnail']
-    if 'image' in data and not data['image'].get('url'): del data['image']
-    if 'footer' in data and not data['footer'].get('icon_url'):
-        if 'text' not in data['footer']: del data['footer']
-        else: del data['footer']['icon_url']
-    if 'author' in data and not data['author'].get('icon_url'): 
-        if 'name' not in data['author']: del data['author']
-        else: del data['author']['icon_url']
-    return data
-
-# --- CONFIGURATION PAR DÉFAUT DE L'INTERFACE ---
-VOICE_BUTTONS_DEFAULTS = {
-    "vd_limit": {"emoji": "👥", "label": "Limit", "style": discord.ButtonStyle.secondary, "row": 0},
-    "vd_privacy": {"emoji": "🛡️", "label": "Privacy", "style": discord.ButtonStyle.secondary, "row": 0},
-    "vd_trust": {"emoji": "👤", "label": "Trust", "style": discord.ButtonStyle.secondary, "row": 0},
-    "vd_untrust": {"emoji": "💔", "label": "Untrust", "style": discord.ButtonStyle.secondary, "row": 0},
-    "vd_kick": {"emoji": "🦵", "label": "Kick", "style": discord.ButtonStyle.secondary, "row": 0},
-    "vd_block": {"emoji": "🚫", "label": "Block", "style": discord.ButtonStyle.secondary, "row": 1},
-    "vd_unblock": {"emoji": "✅", "label": "Unblock", "style": discord.ButtonStyle.secondary, "row": 1},
-    "vd_transfer": {"emoji": "👑", "label": "Transfer", "style": discord.ButtonStyle.secondary, "row": 1},
-    "vd_claim": {"emoji": "✊", "label": "Claim", "style": discord.ButtonStyle.secondary, "row": 1},
-    "vd_delete": {"emoji": "🗑️", "label": "Delete", "style": discord.ButtonStyle.secondary, "row": 1}
-}
-
-VOICE_PRIVACY_DEFAULTS = {
-    "lock": {"emoji": "🔒", "label": "Verrouiller", "description": "Fermer l'accès au salon."},
-    "unlock": {"emoji": "🔓", "label": "Déverrouiller", "description": "Ouvrir l'accès à tous."},
-    "hide": {"emoji": "🙈", "label": "Invisible", "description": "Cacher le salon aux autres."},
-    "show": {"emoji": "👁️", "label": "Visible", "description": "Rendre le salon visible."},
-    "close_chat": {"emoji": "💬", "label": "Fermer le chat", "description": "Chat réservé aux membres."},
-    "open_chat": {"emoji": "🗨️", "label": "Ouvrir le chat", "description": "Chat ouvert à tous."}
-}
-
-def get_voice_ui_config(item_id: str, item_type: str = "button"):
-    defaults = VOICE_BUTTONS_DEFAULTS if item_type == "button" else VOICE_PRIVACY_DEFAULTS
-    saved_config = db.get('settings', {}).get('voice_ui', {}).get(item_type, {}).get(item_id, {})
-    base = defaults.get(item_id, {}).copy()
-    base.update(saved_config)
-    return base
-
-# --- LOGIQUE DES PERMISSIONS VOCALES ---
-async def update_voice_permission(channel, target, connect=None, view=None, speak=None):
-    overwrite = channel.overwrites_for(target)
-    if connect is not None: overwrite.connect = connect
-    if view is not None: overwrite.view_channel = view
-    if speak is not None: overwrite.speak = speak
-    await channel.set_permissions(target, overwrite=overwrite)
-
-# --- VUES ET MODALES DE L'INTERFACE ---
-
-class VoiceLimitModal(Modal, title="Configurer la Limite"):
-    limit = TextInput(label="Nombre max d'utilisateurs (0-99)", placeholder="0 = Illimité", min_length=1, max_length=2)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            limit = int(self.limit.value)
-            if limit < 0 or limit > 99: raise ValueError
-            if interaction.user.voice and interaction.user.voice.channel:
-                await interaction.user.voice.channel.edit(user_limit=limit)
-                await interaction.response.send_message(f"✅ Limite définie à **{limit if limit > 0 else 'Illimité'}**.", ephemeral=True)
-            else:
-                await interaction.response.send_message("❌ Vous n'êtes plus dans le salon.", ephemeral=True)
-        except:
-            await interaction.response.send_message("❌ Nombre invalide.", ephemeral=True)
-
-class VoicePrivacyView(View):
-    def __init__(self, voice_channel):
-        super().__init__(timeout=60)
-        self.voice_channel = voice_channel
-        self.build_select_menu()
-
-    def build_select_menu(self):
-        options = []
-        for key in VOICE_PRIVACY_DEFAULTS.keys():
-            cfg = get_voice_ui_config(key, "privacy")
-            options.append(discord.SelectOption(
-                label=cfg.get('label') or key,
-                value=key,
-                emoji=cfg.get('emoji'),
-                description=cfg.get('description')
-            ))
-
-        self.select = Select(placeholder="Choisir une option de confidentialité...", options=options)
-        self.select.callback = self.callback
-        self.add_item(self.select)
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        val = self.select.values[0]
-        vc = self.voice_channel
-        everyone = vc.guild.default_role
-        
-        cfg = get_voice_ui_config(val, "privacy")
-        label = cfg.get('label', val)
-        emoji = cfg.get('emoji', '')
-        msg = f"{emoji} **{label}** appliqué."
-
-        if val == "lock": await update_voice_permission(vc, everyone, connect=False)
-        elif val == "unlock": await update_voice_permission(vc, everyone, connect=True)
-        elif val == "hide": await update_voice_permission(vc, everyone, view=False)
-        elif val == "show": await update_voice_permission(vc, everyone, view=True)
-        elif val == "close_chat": await vc.set_permissions(everyone, send_messages=False)
-        elif val == "open_chat": await vc.set_permissions(everyone, send_messages=True)
-            
-        await interaction.followup.send(msg, ephemeral=True)
-
-class VoiceUserActionView(View):
-    def __init__(self, action: str, voice_channel: discord.VoiceChannel, current_list: list = None):
-        super().__init__(timeout=60)
-        self.action = action
-        self.voice_channel = voice_channel
-        self.current_list = current_list or []
-
-        if action in ["untrust", "unblock"]:
-            options = []
-            for uid in self.current_list:
-                member = voice_channel.guild.get_member(uid)
-                label = member.display_name if member else f"Utilisateur {uid}"
-                options.append(discord.SelectOption(label=label, value=str(uid)))
-            
-            if not options: self.add_item(Select(placeholder="Personne dans la liste...", options=[discord.SelectOption(label="Vide", value="none")], disabled=True))
-            else:
-                select = Select(placeholder=f"Choisir les membres à {action}...", options=options[:25], max_values=min(len(options), 25))
-                select.callback = self.callback_string
-                self.add_item(select)
-        else:
-            select = discord.ui.UserSelect(placeholder=f"Rechercher des membres pour {action}...", max_values=5)
-            select.callback = self.callback_user
-            self.add_item(select)
-
-    async def callback_user(self, interaction: discord.Interaction): await self.process_users(interaction, interaction.data['values'])
-    async def callback_string(self, interaction: discord.Interaction):
-        if self.children[0].values[0] == "none": return
-        await self.process_users(interaction, self.children[0].values)
-
-    async def process_users(self, interaction: discord.Interaction, user_ids):
-        await interaction.response.defer(ephemeral=True)
-        vc = self.voice_channel
-        channel_id = str(vc.id)
-        if channel_id not in db['temp_channels']: db['temp_channels'][channel_id] = {'owner_id': interaction.user.id, 'trusted': [], 'blocked': []}
-        channel_data = db['temp_channels'][channel_id]
-        updated_names = []
-
-        for uid_str in user_ids:
-            try: uid = int(uid_str)
-            except ValueError: continue
-            member = interaction.guild.get_member(uid)
-            if not member and self.action not in ["untrust", "unblock"]: continue
-            if uid == interaction.user.id: continue
-
-            if self.action == "trust":
-                if uid not in channel_data['trusted']:
-                    channel_data['trusted'].append(uid)
-                    await update_voice_permission(vc, member, connect=True, view=True)
-                    try: await member.send(f"🛡️ **De confiance !** Vous êtes désormais de confiance dans le salon de {interaction.user.display_name}.")
-                    except: pass
-                    updated_names.append(member.display_name)
-            elif self.action == "kick":
-                if member and member in vc.members:
-                    await member.move_to(None)
-                    updated_names.append(member.display_name)
-            elif self.action == "block":
-                if uid not in channel_data['blocked']:
-                    channel_data['blocked'].append(uid)
-                    if member:
-                        await update_voice_permission(vc, member, connect=False)
-                        if member in vc.members: await member.move_to(None)
-                    updated_names.append(member.display_name if member else str(uid))
-            elif self.action == "transfer":
+        await channel.send(embed=embed)
+        logger.info(f"TopWeek: Classement publié avec succès.")
+        if reward_winners:
+            logger.info(f"TopWeek: Application des récompenses XP pour {len(reward_winners)} joueur(s).")
+            for user_id, gains in reward_winners.items():
+                await update_user_xp(user_id, gains["xp"], is_weekly_xp=False)
+                member = channel.guild.get_member(user_id)
                 if member:
-                    channel_data['owner_id'] = uid
-                    await update_voice_permission(vc, member, connect=True, view=True, speak=True)
-                    await vc.edit(name=f"🎧 Salon de {member.display_name}")
-                    await interaction.followup.send(f"👑 **Transfert !** Le salon appartient maintenant à {member.mention}.", ephemeral=True)
-                    save_data(db)
-                    return 
-
-        if self.action == "untrust":
-            for uid_str in user_ids:
-                uid = int(uid_str)
-                if uid in channel_data['trusted']:
-                    channel_data['trusted'].remove(uid)
-                    member = interaction.guild.get_member(uid)
-                    if member: await vc.set_permissions(member, overwrite=None)
-                    updated_names.append(member.display_name if member else str(uid))
-        elif self.action == "unblock":
-            for uid_str in user_ids:
-                uid = int(uid_str)
-                if uid in channel_data['blocked']:
-                    channel_data['blocked'].remove(uid)
-                    member = interaction.guild.get_member(uid)
-                    if member: await vc.set_permissions(member, overwrite=None)
-                    updated_names.append(member.display_name if member else str(uid))
-
+                    await check_and_handle_progression(member, channel)
+            save_data(db)
+        db["settings"]["topweek_settings"]["last_posted_week"] = current_week_str
         save_data(db)
-        if updated_names:
-            action_map = {"trust": "ajoutés aux amis", "untrust": "retirés", "block": "bloqués", "unblock": "débloqués", "kick": "exclus"}
-            await interaction.followup.send(f"✅ Utilisateurs {action_map.get(self.action, 'modifiés')} : {', '.join(updated_names)}", ephemeral=True)
-        else: await interaction.followup.send("❌ Aucune modification effectuée.", ephemeral=True)
+    except discord.Forbidden:
+        logger.error(f"TopWeek: Permissions manquantes pour poster le classement dans #{channel.name}")
+    except Exception as e:
+        logger.exception(f"TopWeek: Erreur lors de la publication du classement: {e}")
 
-class VoiceDeleteConfirmView(View):
-    def __init__(self, voice_channel):
-        super().__init__(timeout=30)
-        self.voice_channel = voice_channel
-    @discord.ui.button(label="Confirmer la suppression", style=discord.ButtonStyle.danger, emoji="🗑️")
-    async def confirm(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer()
-        try: await self.voice_channel.delete()
-        except: await interaction.followup.send("❌ Impossible de supprimer le salon.", ephemeral=True)
-
-# --- VUE PRINCIPALE (PANEL PERMANENT) ---
-class VoiceDashboardView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.rebuild_buttons()
-
-    def rebuild_buttons(self):
-        self.clear_items()
-        for btn_id in VOICE_BUTTONS_DEFAULTS.keys():
-            cfg = get_voice_ui_config(btn_id, "button")
-            label = cfg.get("label")
-            if not label or label.strip() == "": label = None
-            
-            button = Button(
-                style=cfg.get("style", discord.ButtonStyle.secondary),
-                label=label,
-                emoji=cfg.get("emoji"),
-                custom_id=btn_id,
-                row=cfg.get("row", 0)
-            )
-            if btn_id == "vd_limit": button.callback = self.btn_limit
-            elif btn_id == "vd_privacy": button.callback = self.btn_privacy
-            elif btn_id == "vd_trust": button.callback = self.btn_trust
-            elif btn_id == "vd_untrust": button.callback = self.btn_untrust
-            elif btn_id == "vd_kick": button.callback = self.btn_kick
-            elif btn_id == "vd_block": button.callback = self.btn_block
-            elif btn_id == "vd_unblock": button.callback = self.btn_unblock
-            elif btn_id == "vd_transfer": button.callback = self.btn_transfer
-            elif btn_id == "vd_claim": button.callback = self.btn_claim
-            elif btn_id == "vd_delete": button.callback = self.btn_delete
-            self.add_item(button)
-
-    async def get_active_channel(self, interaction: discord.Interaction):
-        if not interaction.user.voice or not interaction.user.voice.channel:
-            await self.send_error(interaction)
-            return None, None
-        vc = interaction.user.voice.channel
-        channel_id = str(vc.id)
-        if channel_id not in db['temp_channels']:
-            await interaction.response.send_message("❌ Ce salon vocal n'est pas géré par le bot.", ephemeral=True)
-            return None, None
-        data = db['temp_channels'][channel_id]
-        if interaction.data.get('custom_id') == "vd_claim": return interaction.user.voice.channel, False
-        is_owner = data['owner_id'] == interaction.user.id
-        if not is_owner:
-            await interaction.response.send_message("❌ Vous n'êtes pas le propriétaire de ce salon.", ephemeral=True)
-            return None, None
-        return vc, is_owner
-
-    async def send_error(self, interaction: discord.Interaction):
-        hub_channel = None
-        for hub_id in db.get('voice_hubs', {}):
-            try:
-                hub_channel = interaction.guild.get_channel(int(hub_id))
-                if hub_channel: break
-            except: pass
-        hub_mention = hub_channel.mention if hub_channel else "un salon créateur"
-        
-        error_json_str = db.get('settings', {}).get('voice_error_json')
-        embed = None
-        if error_json_str:
-            try:
-                data = json.loads(error_json_str)
-                if 'embeds' in data: data = data['embeds'][0]
-                desc = data.get('description', '').replace('{user}', interaction.user.mention).replace('{hub}', hub_mention)
-                data['description'] = desc
-                embed = discord.Embed.from_dict(data)
-            except: pass
-        if not embed:
-            embed = discord.Embed(title="❌ Erreur Vocal", description=f"Vous n'êtes pas dans un salon vocal temporaire.\nRejoignez d'abord {hub_mention}.", color=0x8B0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def btn_limit(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc: await interaction.response.send_modal(VoiceLimitModal())
-    async def btn_privacy(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc: await interaction.response.send_message("Configuration Confidentialité :", view=VoicePrivacyView(vc), ephemeral=True)
-    async def btn_trust(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc: await interaction.response.send_message("Ajouter confiance :", view=VoiceUserActionView("trust", vc), ephemeral=True)
-    async def btn_untrust(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc:
-            trusted = db['temp_channels'][str(vc.id)].get('trusted', [])
-            await interaction.response.send_message("Retirer la confiance :", view=VoiceUserActionView("untrust", vc, trusted), ephemeral=True)
-    async def btn_kick(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc: await interaction.response.send_message("Expulser un membre :", view=VoiceUserActionView("kick", vc), ephemeral=True)
-    async def btn_block(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc: await interaction.response.send_message("Bloquer un membre :", view=VoiceUserActionView("block", vc), ephemeral=True)
-    async def btn_unblock(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc:
-            blocked = db['temp_channels'][str(vc.id)].get('blocked', [])
-            await interaction.response.send_message("Débloquer un membre :", view=VoiceUserActionView("unblock", vc, blocked), ephemeral=True)
-    async def btn_transfer(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc: await interaction.response.send_message("Transférer la propriété :", view=VoiceUserActionView("transfer", vc), ephemeral=True)
-    async def btn_claim(self, interaction: discord.Interaction):
-        if not interaction.user.voice or not interaction.user.voice.channel: return await self.send_error(interaction)
-        channel_id = str(interaction.user.voice.channel.id)
-        if channel_id not in db['temp_channels']: return await interaction.response.send_message("❌ Ce n'est pas un salon temporaire.", ephemeral=True)
-        data = db['temp_channels'][channel_id]
-        current_owner = interaction.guild.get_member(data['owner_id'])
-        if not current_owner or current_owner not in interaction.user.voice.channel.members:
-            data['owner_id'] = interaction.user.id
-            save_data(db)
-            await interaction.user.voice.channel.edit(name=f"🎧 Salon de {interaction.user.display_name}")
-            await interaction.response.send_message(f"👑 Propriété récupérée !", ephemeral=True)
-        else: await interaction.response.send_message(f"❌ Le propriétaire est encore là !", ephemeral=True)
-    async def btn_delete(self, interaction: discord.Interaction):
-        vc, is_owner = await self.get_active_channel(interaction)
-        if vc: await interaction.response.send_message("⚠️ **Vous êtes sûr ?**", view=VoiceDeleteConfirmView(vc), ephemeral=True)
-
-# --- CLASSES AUXILIAIRES DE CONFIGURATION ---
-class VoiceUIEditModal(Modal):
-    def __init__(self, item_id, item_label, item_type, view_ref):
-        super().__init__(title=f"Éditer : {item_label}")
-        self.item_id = item_id
-        self.item_type = item_type
-        self.view_ref = view_ref
-        current_cfg = get_voice_ui_config(item_id, item_type)
-        self.emoji_input = TextInput(label="Emoji", placeholder="ex: 🚀", default=current_cfg.get('emoji'), max_length=5, required=True)
-        self.label_input = TextInput(label="Texte (Vide pour cacher)", placeholder="Texte...", default=current_cfg.get('label'), required=False)
-        self.add_item(self.emoji_input)
-        self.add_item(self.label_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        new_emoji = self.emoji_input.value.strip()
-        new_label = self.label_input.value.strip()
-        db.setdefault('settings', {}).setdefault('voice_ui', {}).setdefault(self.item_type, {})[self.item_id] = {"emoji": new_emoji, "label": new_label}
-        save_data(db)
-        await interaction.followup.send(f"✅ Élément **{self.item_id}** mis à jour !", ephemeral=True)
-
-class VoiceElementSelectView(View):
-    def __init__(self, config_type):
-        super().__init__(timeout=180)
-        self.config_type = config_type
-        options = []
-        source_dict = VOICE_BUTTONS_DEFAULTS if config_type == "button" else VOICE_PRIVACY_DEFAULTS
-        for key, default_data in source_dict.items():
-            current = get_voice_ui_config(key, config_type)
-            options.append(discord.SelectOption(label=f"{key} ({default_data['label']})", value=key, description=f"Actuel: {current.get('emoji')} {current.get('label')}", emoji=current.get('emoji')))
-        self.select = Select(placeholder=f"Choisir un élément ({config_type})...", options=options)
-        self.select.callback = self.on_select
-        self.add_item(self.select)
-
-    async def on_select(self, interaction: discord.Interaction):
-        item_id = self.select.values[0]
-        defaults = VOICE_BUTTONS_DEFAULTS if self.config_type == "button" else VOICE_PRIVACY_DEFAULTS
-        item_label = defaults[item_id]['label']
-        await interaction.response.send_modal(VoiceUIEditModal(item_id, item_label, self.config_type, self))
-
-class VoiceUIConfigView(View):
-    def __init__(self):
-        super().__init__(timeout=180)
-    @discord.ui.button(label="Configurer les Boutons (Panel)", style=discord.ButtonStyle.primary, emoji="🎛️")
-    async def config_buttons(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Quel bouton voulez-vous modifier ?", view=VoiceElementSelectView("button"), ephemeral=True)
-    @discord.ui.button(label="Configurer le Menu Privacy", style=discord.ButtonStyle.success, emoji="🔒")
-    async def config_privacy(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Quelle option du menu Privacy voulez-vous modifier ?", view=VoiceElementSelectView("privacy"), ephemeral=True)
-
-# --- CLASSES HUB MANAGEMENT ---
-class HubSelectView(View):
-    def __init__(self, client_ref, action: str):
-        super().__init__(timeout=180)
-        self.client = client_ref
-        self.action = action
-        options = []
-        for hub_id, hub_data in db.get('voice_hubs', {}).items():
-            if isinstance(hub_data, dict) and 'name' in hub_data:
-                options.append(discord.SelectOption(label=hub_data['name'], value=str(hub_id)))
-        if not options:
-            self.select = Select(placeholder=f"Aucun hub à {action}.", options=[discord.SelectOption(label="...", value="no_options_placeholder")], disabled=True)
-        else:
-            self.select = Select(placeholder=f"Choisir un hub à {action}...", options=options)
-        self.select.callback = self.on_select
-        self.add_item(self.select)
-    async def on_select(self, interaction: discord.Interaction):
-        if interaction.data['values'][0] == "no_options_placeholder": return await interaction.response.defer()
-        hub_id = self.select.values[0]
-        if self.action == "modifier": await interaction.response.send_modal(ModifyHubModal(hub_id))
-        elif self.action == "supprimer":
-            hub_channel = interaction.guild.get_channel(int(hub_id))
-            if hub_channel: await hub_channel.delete()
-            if hub_id in db['voice_hubs']: del db['voice_hubs'][hub_id]
-            save_data(db)
-            await interaction.response.send_message("Hub supprimé.", ephemeral=True)
-
-class ModifyHubModal(Modal, title="Modifier un Hub Vocal"):
-    def __init__(self, hub_id: str):
-        super().__init__()
-        self.hub_id = hub_id
-        hub_data = db['voice_hubs'].get(hub_id, {})
-        self.hub_name = TextInput(label="Nouveau nom", default=hub_data.get('name'))
-        self.user_limit = TextInput(label="Nouvelle limite", default=str(hub_data.get('limit', '0')))
-        self.category_id_input = TextInput(label="Nouvel ID catégorie (opt)", required=False)
-        self.add_item(self.hub_name)
-        self.add_item(self.user_limit)
-        self.add_item(self.category_id_input)
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        hub_data = db['voice_hubs'].get(self.hub_id)
-        hub_channel = interaction.guild.get_channel(int(self.hub_id))
-        if not hub_data or not hub_channel: return await interaction.followup.send("Hub introuvable.", ephemeral=True)
-        try:
-            limit = int(self.user_limit.value)
-            hub_data['limit'] = limit
-            hub_data['name'] = self.hub_name.value
-            new_category = hub_channel.category
-            if self.category_id_input.value:
-                cat_id = int(self.category_id_input.value)
-                new_category = interaction.guild.get_channel(cat_id)
-            await hub_channel.edit(name=self.hub_name.value, category=new_category)
-            save_data(db)
-            await interaction.followup.send("Hub mis à jour.", ephemeral=True)
-        except Exception as e: await interaction.followup.send(f"Erreur : {e}", ephemeral=True)
-
-class CreateHubModal(Modal, title="Créer un Hub Vocal"):
-    def __init__(self, category: discord.CategoryChannel):
-        super().__init__()
-        self.category = category
-        self.hub_name = TextInput(label="Nom du salon Hub", placeholder="Ex: ➕ Créer un salon")
-        self.user_limit = TextInput(label="Limite (0=illimité)", default="0")
-        self.add_item(self.hub_name)
-        self.add_item(self.user_limit)
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            limit = int(self.user_limit.value)
-            if not (0 <= limit <= 99): raise ValueError()
-            new_hub_channel = await self.category.create_voice_channel(name=self.hub_name.value)
-            db['voice_hubs'][str(new_hub_channel.id)] = {"name": self.hub_name.value, "limit": limit, "category_id": self.category.id}
-            save_data(db)
-            await interaction.followup.send(f"Hub '{self.hub_name.value}' créé.", ephemeral=True)
-        except Exception as e: await interaction.followup.send(f"Erreur: {e}", ephemeral=True)
-
-class VoiceHubConfigView(View):
-    def __init__(self, client_ref):
-        super().__init__(timeout=300)
-        self.client = client_ref
-    @discord.ui.button(label="Créer un Hub", style=discord.ButtonStyle.success, emoji="➕")
-    async def create_hub(self, interaction: discord.Interaction, button: Button):
-        categories = [c for c in interaction.guild.categories]
-        if not categories: return await interaction.response.send_message("Aucune catégorie trouvée.", ephemeral=True)
-        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in categories]
-        select = Select(placeholder="Choisissez une catégorie...", options=options)
-        async def select_callback(inter: discord.Interaction):
-            cat = inter.guild.get_channel(int(inter.data['values'][0]))
-            await inter.response.send_modal(CreateHubModal(cat))
-        select.callback = select_callback
-        view = View().add_item(select)
-        await interaction.response.send_message("Dans quelle catégorie ?", view=view, ephemeral=True)
-    @discord.ui.button(label="Modifier un Hub", style=discord.ButtonStyle.primary, emoji="✏️")
-    async def modify_hub(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Choisissez un hub :", view=HubSelectView(self.client, "modifier"), ephemeral=True)
-    @discord.ui.button(label="Supprimer un Hub", style=discord.ButtonStyle.danger, emoji="🗑️")
-    async def delete_hub(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Choisissez un hub :", view=HubSelectView(self.client, "supprimer"), ephemeral=True)
-
-class VoiceInterfaceConfigModal(Modal, title="Design Interface Vocale (JSON)"):
-    json_input = TextInput(label="JSON de l'Embed Interface", style=discord.TextStyle.paragraph, placeholder='{"title": "Contrôle Vocal", "description": "..."}', required=True)
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            data = json.loads(self.json_input.value)
-            data = sanitize_voice_json(data)
-            db.setdefault('settings', {})['voice_interface_json'] = json.dumps(data)
-            save_data(db)
-            await interaction.response.send_message("✅ Design de l'interface vocale mis à jour !", ephemeral=True)
-        except json.JSONDecodeError: await interaction.response.send_message("❌ JSON Invalide.", ephemeral=True)
-
-class VoiceErrorConfigModal(Modal, title="Design Erreur Vocale (JSON)"):
-    json_input = TextInput(label="JSON Message Erreur", style=discord.TextStyle.paragraph, placeholder='{"title": "Erreur", "description": "Rejoignez un salon..."}', required=True)
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            data = json.loads(self.json_input.value)
-            data = sanitize_voice_json(data)
-            db.setdefault('settings', {})['voice_error_json'] = json.dumps(data)
-            save_data(db)
-            await interaction.response.send_message("✅ Design du message d'erreur mis à jour !", ephemeral=True)
-        except json.JSONDecodeError: await interaction.response.send_message("❌ JSON Invalide.", ephemeral=True)
 
 # ==================================================================================================
-# 17. SYSTÈME D'AIDE (INTERACTIF)
+# 16. TÂCHE DE SAUVEGARDE XP
+# ==================================================================================================
+@tasks.loop(hours=6)
+async def backup_xp_data():
+    """Sauvegarde périodiquement les données XP essentielles."""
+    await client.wait_until_ready()
+    logger.info("Création d'une sauvegarde XP...")
+    try:
+        backup_data = {
+            uid: {"xp": data.get("xp", 0), "level": data.get("level", 1)}
+            for uid, data in db.get("users", {}).items()
+        }
+        backup_wrapper = {"timestamp": get_adjusted_time().isoformat(), "users": backup_data}
+        with open(XP_BACKUP_FILE, 'w', encoding='utf-8') as f:
+            json.dump(backup_wrapper, f, indent=2)
+        logger.info(f"Sauvegarde XP terminée avec succès ({len(backup_data)} utilisateurs).")
+    except Exception as e:
+        logger.exception(f"Erreur lors de la sauvegarde XP: {e}")
+
+# ==================================================================================================
+# 17. COMMANDES D'AIDE (Refonte Images & Renommage)
 # ==================================================================================================
 
-HELP_ADMIN_IMAGES = [""] 
-HELP_PLAYER_IMAGES = [""]
+# --- CONFIGURATION DES IMAGES D'AIDE ---
+# Ajoutez vos liens d'images ici pour activer le "Mode Image".
+# Laissez vide ("") pour rester en "Mode Simple" (texte uniquement).
+# Si vous mettez plusieurs liens, cela créera plusieurs pages.
+HELP_ADMIN_IMAGES = [
+    "", # Page 1 Admin (ex: "https://mon-lien.com/image1.png")
+]
+
+HELP_PLAYER_IMAGES = [
+    "", # Page 1 Joueur (ex: "https://mon-lien.com/image_joueur.png")
+]
 
 class HelpView(View):
+    """Vue pour naviguer entre les pages d'aide."""
     def __init__(self, embeds, user):
         super().__init__(timeout=180)
         self.embeds = embeds
@@ -2257,10 +4056,13 @@ class HelpView(View):
         self.add_buttons()
 
     def add_buttons(self):
+        # On vide les boutons précédents pour éviter les doublons lors des mises à jour
         self.clear_items()
+        
         prev_button = Button(label="◀️", style=discord.ButtonStyle.secondary, disabled=True)
         prev_button.callback = self.prev_page
         self.add_item(prev_button)
+
         next_button = Button(label="▶️", style=discord.ButtonStyle.secondary, disabled=len(self.embeds) <= 1)
         next_button.callback = self.next_page
         self.add_item(next_button)
@@ -2281,1143 +4083,116 @@ class HelpView(View):
 
     async def update_message(self, interaction: discord.Interaction):
         embed = self.embeds[self.current_page]
+        # Mettre à jour l'état des boutons
         self.children[0].disabled = self.current_page == 0
         self.children[1].disabled = self.current_page == len(self.embeds) - 1
         await interaction.response.edit_message(embed=embed, view=self)
 
-async def send_player_help_logic(interaction: discord.Interaction):
-    if not interaction.response.is_done(): await interaction.response.defer(ephemeral=True)
+@client.tree.command(name="poxel_help", description="Affiche la liste des commandes d'administration (Poxel).")
+@app_commands.default_permissions(administrator=True)
+async def help_command(interaction: discord.Interaction):
     embeds = []
-    images = [url for url in HELP_PLAYER_IMAGES if url.strip()]
+
+    # Vérification du Mode Image
+    images = [url for url in HELP_ADMIN_IMAGES if url.strip()]
+    
     if images:
+        # MODE IMAGE
+        for i, img_url in enumerate(images):
+            # On garde un titre et une couleur pour l'embed, mais le contenu principal est l'image
+            embed = discord.Embed(title=f"📚 Aide Admin - Poxel (Page {i+1}/{len(images)})", color=NEON_BLUE)
+            embed.set_image(url=img_url)
+            embeds.append(embed)
+    else:
+        # MODE SIMPLE (Texte par défaut)
+        embed1 = discord.Embed(title="📚 Aide Admin (1/1) - Config & Systèmes", color=NEON_BLUE)
+        embed1.add_field(name="`/poxel_help` / `/poxel_help_joueur`", value="Affiche les panneaux d'aide.", inline=False)
+        embed1.add_field(name="`/avatar config panel`", value="Configure l'avatar dynamique.", inline=False)
+        embed1.add_field(name="`/notif`", value="Gère les notifications (add/remove/list/config/test).", inline=False)
+        embed1.add_field(name="`/admin_sync`", value="Force la synchronisation des commandes.", inline=False) 
+        embed1.add_field(name="`/freegames config` / `/freegames disable`", value="Gère le salon des jeux gratuits.", inline=False)
+        embed1.add_field(name="`/cineconfig set_channel` / `/cineconfig remove_channel`", value="Gère les salons Ciné Pixel.", inline=False) 
+        embed1.add_field(name="`/birthdayadmin config`", value="Définit le salon des anniversaires.", inline=False)
+        embed1.add_field(name="`/topweekadmin config`", value="Configure l'annonce du classement hebdo.", inline=False)
+        embed1.add_field(name="`/rewards`", value="Configure les récompenses de niveau (salon, rôle).", inline=False)
+        embed1.add_field(name="`/config_listener` / `/reset_listener`", value="Gère l'écoute des bots Mod/Event.", inline=False)
+        embed1.add_field(name="`/adminxp`", value="Gère l'XP des joueurs (give/setlevel/resetweekly).", inline=False)
+        embeds.append(embed1)
+
+    view = HelpView(embeds, interaction.user)
+    await interaction.response.send_message(embed=embeds[0], view=view, ephemeral=True)
+
+
+@client.tree.command(name="poxel_help_joueur", description="Affiche les commandes et fonctionnalités disponibles (Poxel).")
+async def help_joueur(interaction: discord.Interaction):
+    embeds = []
+
+    # Vérification du Mode Image
+    images = [url for url in HELP_PLAYER_IMAGES if url.strip()]
+
+    if images:
+        # MODE IMAGE
         for i, img_url in enumerate(images):
             embed = discord.Embed(title=f"🎮 Aide Joueur - Poxel (Page {i+1}/{len(images)})", color=NEON_GREEN)
             embed.set_image(url=img_url)
             embeds.append(embed)
     else:
-        embed = discord.Embed(title="🎮 Commandes & Infos pour les Joueurs", description="Voici les fonctionnalités que tu peux utiliser !", color=NEON_GREEN)
-        embed.add_field(name="❤️ `/vies`", value="Affiche ta barre de vie, tes infractions et quand elles expirent.", inline=False)
-        embed.add_field(name="📈 `/rank`", value="Affiche ta carte de niveau et tes classements.", inline=False)
-        embed.add_field(name="🎤 Salons Vocaux", value="Rejoins un salon vocal `➕ Créer un salon` pour avoir ton propre canal.", inline=False)
-        embed.add_field(name="🎟️ Support", value="Utilise les salons de tickets/reports pour contacter le staff.", inline=False)
-        embeds.append(embed)
-    view = HelpView(embeds, interaction.user)
-    await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
-
-async def send_admin_help_logic(interaction: discord.Interaction):
-    if not interaction.response.is_done(): await interaction.response.defer(ephemeral=True)
-    embeds = []
-    images = [url for url in HELP_ADMIN_IMAGES if url.strip()]
-    if images:
-        for i, img_url in enumerate(images):
-            embed = discord.Embed(title=f"📚 Aide Modération - Poxel (Page {i+1}/{len(images)})", color=NEON_BLUE)
-            embed.set_image(url=img_url)
-            embeds.append(embed)
-    else:
-        embed1 = discord.Embed(title="📚 Aide Admin (1/1) - Modération & Config", color=NEON_BLUE)
-        embed1.add_field(name="🛡️ **Modération**", value="`/ban`, `/tempban`, `/kick`, `/mute`, `/unmute`, `/warn`, `/unban`", inline=False)
-        embed1.add_field(name="⚙️ **Configuration**", value="`/config`, `/ticket`, `/report`, `/signalement`, `/suggestion`", inline=False)
-        embed1.add_field(name="🎥 **Ciné Pixel**", value="`/cineconfig set_channel`, `/news_series`, `/news_movies`", inline=False)
+        # MODE SIMPLE (Texte par défaut)
+        embed1 = discord.Embed(title="🎮 Commandes Joueur (1/1) - Profil & Social", color=NEON_GREEN)
+        embed1.add_field(name="**__PROFIL & CLASSEMENTS__**", value="\u200b", inline=False)
+        embed1.add_field(name="`/rank`", value="Affiche ton profil XP et tes rangs.", inline=True)
+        embed1.add_field(name="**__SOCIAL & PERSONNALISATION__**", value="\u200b", inline=False)
+        embed1.add_field(name="`/team`", value="Commandes pour créer/gérer ton équipe.", inline=True)
+        embed1.add_field(name="`/teamlist`", value="Voir la liste des équipes.", inline=True)
+        embed1.add_field(name="`/birthday`", value="Gère ton anniversaire (set/remove).", inline=True)
+        embed1.add_field(name="`/birthdaylist`", value="Voir les anniversaires.", inline=True)
+        embed1.add_field(name="`/nextbirthday`", value="Voir le prochain anniversaire.", inline=True)
+        embed1.add_field(name="**__UTILITAIRES__**", value="\u200b", inline=False)
+        embed1.add_field(name="`/free`", value="Voir les jeux gratuits du moment.", inline=True)
+        embed1.add_field(name="`/news_series` / `/news_movies`", value="Voir les sorties récentes (privé).", inline=True) 
+        embed1.add_field(name="`/episodes_series` / `/episodes_anime`", value="Voir les épisodes du jour (privé).", inline=True)
+        embed1.add_field(name="`/ping`", value="Vérifie la latence du bot.", inline=True)
         embeds.append(embed1)
+
     view = HelpView(embeds, interaction.user)
-    await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
+    await interaction.response.send_message(embed=embeds[0], view=view, ephemeral=True)
 
 
 # ==================================================================================================
-# 18. INTERFACES DE CONFIGURATION GÉNÉRALE (SETTINGS)
+# 18. COMMANDES ADMIN RESTANTES (Récap)
 # ==================================================================================================
 
-# --- MODALES DE CONFIGURATION GÉNÉRALE ---
-
-class PurgeSettingsModal(Modal, title="Configurer Purge d'Infractions"):
-    def __init__(self):
-        super().__init__()
-        self.duration_input = TextInput(label="Durée avant purge (jours)", default=str(db['settings'].get("purge_duration_days", 180)))
-        self.add_item(self.duration_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            days = int(self.duration_input.value)
-            if days <= 0: return await interaction.followup.send("La durée doit être d'au moins 1 jour.", ephemeral=True)
-            db['settings']['purge_duration_days'] = days
-            save_data(db)
-            await interaction.followup.send(f"✅ Purge automatique réglée sur **{days} jours**.", ephemeral=True)
-        except ValueError:
-            await interaction.followup.send("❌ Nombre invalide.", ephemeral=True)
-
-class LifeEmojiConfigModal(Modal, title="Configurer les Emojis de Vie"):
-    def __init__(self):
-        super().__init__()
-        self.full_input = TextInput(label="Cœur Plein", default=db['settings'].get("life_emoji_full", "❤️"))
-        self.empty_input = TextInput(label="Cœur Vide", default=db['settings'].get("life_emoji_empty", "🖤"))
-        self.boost_input = TextInput(label="Cœur Boost (10e vie)", default=db['settings'].get("life_emoji_boost", "💛"))
-        self.add_item(self.full_input)
-        self.add_item(self.empty_input)
-        self.add_item(self.boost_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        db['settings']['life_emoji_full'] = self.full_input.value.strip()
-        db['settings']['life_emoji_empty'] = self.empty_input.value.strip()
-        db['settings']['life_emoji_boost'] = self.boost_input.value.strip()
-        save_data(db)
-        await interaction.followup.send("✅ Emojis de vie mis à jour !", ephemeral=True)
-
-class SetLogChannelModal(Modal, title="Configurer Salon Logs Modération"):
-    channel_id_input = TextInput(label="ID du Salon de Logs", placeholder="Vide pour désactiver", required=False)
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        val = self.channel_id_input.value.strip()
-        if val:
-            try:
-                cid = int(val)
-                db['settings']['auto_mod_log_channel_id'] = cid
-                save_data(db)
-                await interaction.followup.send(f"✅ Salon de logs défini (ID: {cid}).", ephemeral=True)
-            except: await interaction.followup.send("❌ ID Invalide.", ephemeral=True)
-        else:
-            db['settings']['auto_mod_log_channel_id'] = None
-            save_data(db)
-            await interaction.followup.send("✅ Logs de modération désactivés.", ephemeral=True)
-
-# --- VUES DE CONFIGURATION ---
-
-class GeneralSettingsView(View):
-    def __init__(self):
-        super().__init__(timeout=300)
-
-    @discord.ui.button(label="Emojis de Vie", style=discord.ButtonStyle.secondary, emoji="❤️", row=0)
-    async def set_life_emojis(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(LifeEmojiConfigModal())
-
-    @discord.ui.button(label="Durée Purge", style=discord.ButtonStyle.primary, emoji="🗓️", row=0)
-    async def set_purge_duration(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(PurgeSettingsModal())
-
-    @discord.ui.button(label="Salon Logs Mod", style=discord.ButtonStyle.secondary, emoji="📜", row=0)
-    async def set_log_channel(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(SetLogChannelModal())
-
-    @discord.ui.button(label="Retour", style=discord.ButtonStyle.grey, emoji="↩️", row=1)
-    async def back_button(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(content="Panneau de configuration principal:", view=MainConfigView(interaction.client))
-
-class CensorConfigView(View):
-    def __init__(self):
-        super().__init__(timeout=300)
-        self.update_button()
-
-    def update_button(self):
-        for i in self.children[:]:
-            if getattr(i, 'custom_id', '') == 'tgl_censor': self.remove_item(i)
-        enabled = db['settings'].get("censor_enabled", True)
-        btn = Button(label=f"Censure: {'ON' if enabled else 'OFF'}", style=discord.ButtonStyle.success if enabled else discord.ButtonStyle.danger, custom_id="tgl_censor", row=0)
-        btn.callback = self.toggle
-        self.add_item(btn)
-
-    async def toggle(self, interaction: discord.Interaction):
-        db['settings']["censor_enabled"] = not db['settings'].get("censor_enabled", True)
-        save_data(db)
-        self.update_button()
-        await interaction.response.edit_message(view=self)
-
-    @discord.ui.button(label="Ajouter Mot", style=discord.ButtonStyle.primary, emoji="➕", row=1)
-    async def add_w(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(self.WordModal("add"))
-
-    @discord.ui.button(label="Retirer Mot", style=discord.ButtonStyle.secondary, emoji="➖", row=1)
-    async def rem_w(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_modal(self.WordModal("remove"))
-
-    @discord.ui.button(label="Retour", style=discord.ButtonStyle.grey, emoji="↩️", row=2)
-    async def back(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(content="Panneau principal:", view=MainConfigView(interaction.client))
-
-    class WordModal(Modal):
-        def __init__(self, action):
-            super().__init__(title=f"{action.capitalize()} Mot")
-            self.action = action
-            self.w = TextInput(label="Mot", required=True)
-            self.add_item(self.w)
-        async def on_submit(self, interaction: discord.Interaction):
-            w = self.w.value.lower().strip()
-            l = db['settings'].setdefault('censored_words', [])
-            if self.action == "add" and w not in l: l.append(w)
-            elif self.action == "remove" and w in l: l.remove(w)
-            save_data(db)
-            await interaction.response.send_message(f"✅ Liste mise à jour.", ephemeral=True)
-
-class MainConfigView(View):
-    def __init__(self, client_ref):
-        super().__init__(timeout=300)
-        self.client = client_ref
-
-    @discord.ui.button(label="Salons Vocaux", style=discord.ButtonStyle.primary, emoji="🎤", row=0)
-    async def voice_config(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(content="Configuration Vocale :", view=VoiceHubConfigView(self.client))
-
-    @discord.ui.button(label="Censure", style=discord.ButtonStyle.secondary, emoji="🤬", row=0)
-    async def censor(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(content="📝 Censure :", view=CensorConfigView())
-
-    @discord.ui.button(label="Paramètres Généraux", style=discord.ButtonStyle.secondary, emoji="⚙️", row=1)
-    async def general(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.edit_message(content="⚙️ Général :", view=GeneralSettingsView())
+# (Les commandes adminxp, rewards, config_listener, admin_sync, topweekadmin_config sont déjà dans la Partie 5)
 
 # ==================================================================================================
-# 19. PANELS PERMANENTS (MODÉRATION, CONFIG, JOUEURS)
+# 19. DÉMARRAGE DU BOT ET DES TÂCHES
 # ==================================================================================================
-
-# --- MODALES D'ACTIONS RAPIDES (Liées aux boutons des panels) ---
-
-class ModReasonModal(Modal):
-    def __init__(self, action: str, target: discord.User):
-        super().__init__(title=f"Action: {action.upper()}")
-        self.action = action
-        self.target = target
-        self.reason = TextInput(label="Raison", required=True)
-        self.add_item(self.reason)
-        if action in ["tempban", "mute"]:
-            self.duration = TextInput(label="Durée (ex: 1h, 30m)", required=True)
-            self.add_item(self.duration)
-        if action in ["ban", "kick", "mute", "warn", "tempban"]:
-            self.lives = TextInput(label="Vies (Vide=Défaut)", required=False)
-            self.add_item(self.lives)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        reason_text = self.reason.value
-        points = int(self.lives.value) if hasattr(self, 'lives') and self.lives.value.isdigit() else None
-        
-        # Appel aux logiques définies dans la Partie 3
-        if self.action == "ban": await poxel_ban_logic(interaction, self.target, reason_text, points)
-        elif self.action == "kick": await poxel_kick_logic(interaction, self.target, reason_text, points)
-        elif self.action == "warn": await poxel_warn_logic(interaction, self.target, reason_text, points)
-        elif self.action == "unban": await poxel_unban_logic(interaction, str(self.target.id), reason_text)
-        elif self.action == "tempban": await poxel_tempban_logic(interaction, self.target, self.duration.value, reason_text, points)
-        elif self.action == "mute": await poxel_mute_logic(interaction, self.target, self.duration.value, reason_text, points)
-        elif self.action == "unmute": await poxel_unmute_logic(interaction, self.target.id)
-        elif self.action == "clear_all": await poxel_clear_infs_logic(interaction, self.target, reason_text)
-
-class ModUserSelect(discord.ui.UserSelect):
-    def __init__(self, action):
-        self.action = action
-        super().__init__(placeholder="Sélectionner le membre...", min_values=1, max_values=1)
-    async def callback(self, interaction: discord.Interaction):
-        target = self.values[0]
-        if self.action == "infractions":
-            await interaction.response.defer(ephemeral=True)
-            infs = db['infractions'].get(str(target.id), [])
-            desc = "\n".join([f"• {i['type'].upper()}: {i['reason']}" for i in infs]) if infs else "Aucune infraction."
-            await interaction.followup.send(embed=discord.Embed(title=f"Dossier {target}", description=desc, color=NEON_PURPLE), ephemeral=True)
-        else:
-            await interaction.response.send_modal(ModReasonModal(self.action, target))
-
-class ModUserSelectView(View):
-    def __init__(self, action):
-        super().__init__(timeout=60)
-        self.add_item(ModUserSelect(action))
-
-# --- VUES DES PANELS ---
-
-class ModerationPanelView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    async def check_perm(self, interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("⛔ Accès refusé.", ephemeral=True)
-            return False
-        return True
-
-    async def open_sel(self, interaction, action):
-        if await self.check_perm(interaction):
-            await interaction.response.send_message(f"Action: **{action.upper()}**", view=ModUserSelectView(action), ephemeral=True)
-
-    @discord.ui.button(label="Ban", emoji="🔨", style=discord.ButtonStyle.secondary, custom_id="mod_ban", row=0)
-    async def ban(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "ban")
-    
-    @discord.ui.button(label="Kick", emoji="🦵", style=discord.ButtonStyle.secondary, custom_id="mod_kick", row=0)
-    async def kick(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "kick")
-
-    @discord.ui.button(label="Mute", emoji="🔇", style=discord.ButtonStyle.secondary, custom_id="mod_mute", row=0)
-    async def mute(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "mute")
-
-    @discord.ui.button(label="Warn", emoji="⚠️", style=discord.ButtonStyle.secondary, custom_id="mod_warn", row=0)
-    async def warn(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "warn")
-
-    @discord.ui.button(label="Tempban", emoji="⏳", style=discord.ButtonStyle.secondary, custom_id="mod_tempban", row=1)
-    async def tempban(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "tempban")
-
-    @discord.ui.button(label="Unban", emoji="🔓", style=discord.ButtonStyle.secondary, custom_id="mod_unban", row=1)
-    async def unban(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "unban")
-
-    @discord.ui.button(label="Unmute", emoji="🔊", style=discord.ButtonStyle.secondary, custom_id="mod_unmute", row=1)
-    async def unmute(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "unmute")
-
-    @discord.ui.button(label="Dossier", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="mod_infs", row=2)
-    async def infs(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "infractions")
-
-    @discord.ui.button(label="Reset", emoji="♻️", style=discord.ButtonStyle.secondary, custom_id="mod_clear_all", row=2)
-    async def clear_all(self, interaction: discord.Interaction, button: Button): await self.open_sel(interaction, "clear_all")
-
-class PlayerPanelView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Mes Infractions", emoji="🚨", style=discord.ButtonStyle.secondary, custom_id="play_infs", row=0)
-    async def my_infs(self, interaction: discord.Interaction, button: Button):
-        infs = db['infractions'].get(str(interaction.user.id), [])
-        desc = "\n".join([f"• {i['type'].upper()}: {i['reason']}" for i in infs]) if infs else "Vous êtes clean !"
-        await interaction.response.send_message(embed=discord.Embed(title="Vos Infractions", description=desc, color=NEON_PURPLE), ephemeral=True)
-
-    @discord.ui.button(label="Mes Vies", emoji="❤️", style=discord.ButtonStyle.secondary, custom_id="play_lives", row=0)
-    async def my_lives(self, interaction: discord.Interaction, button: Button):
-        lives = display_lives(interaction.user)
-        await interaction.response.send_message(embed=discord.Embed(title="Vos Vies", description=lives, color=NEON_PURPLE), ephemeral=True)
-
-    @discord.ui.button(label="Aide", emoji="📚", style=discord.ButtonStyle.secondary, custom_id="play_help", row=0)
-    async def help_p(self, interaction: discord.Interaction, button: Button):
-        await send_player_help_logic(interaction)
-
-    @discord.ui.button(label="Mon Vocal", emoji="🎤", style=discord.ButtonStyle.secondary, custom_id="play_vocal", row=1)
-    async def my_vocal(self, interaction: discord.Interaction, button: Button):
-        view = VoiceDashboardView()
-        vc, _ = await view.get_active_channel(interaction)
-        if vc:
-            embed = discord.Embed(title="🎛️ Contrôle Vocal", description=f"Salon: **{vc.name}**", color=NEON_BLUE)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-class ConfigPanelView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Interface Design", emoji="🎨", style=discord.ButtonStyle.secondary, custom_id="conf_ui_design", row=0)
-    async def design_ui(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator: return
-        await interaction.response.send_modal(VoiceInterfaceConfigModal())
-
-    @discord.ui.button(label="Interface Erreur", emoji="⚠️", style=discord.ButtonStyle.secondary, custom_id="conf_err_design", row=0)
-    async def design_err(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator: return
-        await interaction.response.send_modal(VoiceErrorConfigModal())
-
-
-# ==================================================================================================
-# 20. UTILITAIRES JSON & EMBED
-# ==================================================================================================
-
-def sanitize_embed_json(data):
-    """Nettoie récursivement le JSON pour supprimer les clés d'URL vides ou invalides."""
-    if isinstance(data, dict):
-        url_keys = ['url', 'icon_url', 'proxy_icon_url']
-        obj_keys = ['image', 'thumbnail', 'author', 'footer', 'video', 'provider']
-        keys_to_remove = []
-        for k, v in data.items():
-            if k in url_keys:
-                if not isinstance(v, str) or not v.strip() or not v.startswith(('http://', 'https://')):
-                    keys_to_remove.append(k)
-            elif k in obj_keys:
-                if isinstance(v, dict):
-                    sanitize_embed_json(v)
-                    if not v: keys_to_remove.append(k)
-            elif isinstance(v, (dict, list)):
-                sanitize_embed_json(v)
-        for k in keys_to_remove: del data[k]
-    elif isinstance(data, list):
-        for item in data: sanitize_embed_json(item)
-    return data
-
-# ==================================================================================================
-# 21. LOGIQUE DE CONFIGURATION DES PANELS (DESIGN & BOUTONS)
-# ==================================================================================================
-
-class PanelDesignModal(Modal):
-    def __init__(self, panel_type):
-        super().__init__(title=f"Design: {panel_type.capitalize()}")
-        self.panel_type = panel_type
-        self.json_input = TextInput(label="JSON Embed", style=discord.TextStyle.paragraph, placeholder='{"title": "..."}', required=True)
-        self.add_item(self.json_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            json.loads(self.json_input.value)
-            db.setdefault('settings', {})[f'panel_{self.panel_type}_json'] = self.json_input.value
-            save_data(db)
-            await interaction.response.send_message(f"✅ Design **{self.panel_type}** sauvegardé.", ephemeral=True)
-        except: await interaction.response.send_message("❌ JSON Invalide.", ephemeral=True)
-
-class PanelButtonEditModal(Modal):
-    def __init__(self, btn_id, panel_type):
-        super().__init__(title="Éditer Bouton")
-        self.btn_id = btn_id
-        self.panel_type = panel_type
-        # Récupérer la config actuelle ou défaut via une fonction helper simulée ici
-        # (Dans la fusion, get_panel_button_config doit être accessible ou on accède direct à la DB)
-        saved = db.get('settings', {}).get('panel_ui', {}).get(panel_type, {}).get(btn_id, {})
-        self.emoji_inp = TextInput(label="Emoji", default=saved.get('emoji', ''), max_length=5, required=True)
-        self.label_inp = TextInput(label="Texte (Vide = caché)", default=saved.get('label', ''), required=False)
-        self.add_item(self.emoji_inp)
-        self.add_item(self.label_inp)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        db.setdefault('settings', {}).setdefault('panel_ui', {}).setdefault(self.panel_type, {})[self.btn_id] = {
-            "emoji": self.emoji_inp.value.strip(),
-            "label": self.label_inp.value.strip()
-        }
-        save_data(db)
-        await interaction.response.send_message("✅ Bouton mis à jour ! (Re-postez le panel pour voir les changements)", ephemeral=True)
-
-class PanelConfigSelectView(View):
-    def __init__(self, panel_type):
-        super().__init__()
-        self.panel_type = panel_type
-        options = []
-        # On définit les clés basiques pour l'édition (mapping simplifié pour l'exemple)
-        keys = []
-        if panel_type == "mod": keys = ["mod_ban", "mod_kick", "mod_mute", "mod_warn", "mod_tempban", "mod_unban", "mod_unmute", "mod_clear", "mod_infs", "mod_clear_all"]
-        elif panel_type == "conf": keys = ["conf_mc_toggle", "conf_mc_setup", "conf_ui_design", "conf_err_design"]
-        elif panel_type == "player": keys = ["play_infs", "play_lives", "play_help", "play_vocal"]
-        
-        for k in keys: options.append(discord.SelectOption(label=k, value=k))
-        
-        self.sel = Select(placeholder="Choisir un bouton...", options=options[:25])
-        self.sel.callback = self.cb
-        self.add_item(self.sel)
-        
-    async def cb(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(PanelButtonEditModal(self.sel.values[0], self.panel_type))
-
-class PanelSelectionView(View):
-    def __init__(self, mode): # mode = 'design' or 'buttons'
-        super().__init__(timeout=60)
-        self.mode = mode
-        options = [
-            discord.SelectOption(label="Modération", value="mod", emoji="🛡️"),
-            discord.SelectOption(label="Configuration", value="conf", emoji="⚙️"),
-            discord.SelectOption(label="Joueurs", value="player", emoji="🎮")
-        ]
-        self.select = Select(placeholder="Choisir le panel...", options=options)
-        self.select.callback = self.callback
-        self.add_item(self.select)
-
-    async def callback(self, interaction: discord.Interaction):
-        ptype = self.select.values[0]
-        if self.mode == 'design': await interaction.response.send_modal(PanelDesignModal(ptype))
-        elif self.mode == 'buttons': await interaction.response.send_message(f"Configuration boutons **{ptype}** :", view=PanelConfigSelectView(ptype), ephemeral=True)
-
-# ==================================================================================================
-# 22. SYSTÈMES DE TICKETS & INSTALLATION
-# ==================================================================================================
-
-class GenericTicketView(View):
-    def __init__(self, system_type, label, emoji):
-        super().__init__(timeout=None)
-        self.system_type = system_type
-        self.add_item(Button(label=label, emoji=emoji, style=discord.ButtonStyle.primary, custom_id=f"gen_ticket_{system_type}"))
-
-class SystemSetupView(View):
-    def __init__(self, system_type: str):
-        super().__init__(timeout=60)
-        self.system_type = system_type
-        self.add_item(discord.ui.ChannelSelect(channel_types=[discord.ChannelType.category], placeholder="Choisir la catégorie d'installation..."))
-        self.children[0].callback = self.callback
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        category = self.children[0].values[0]
-        configs = {
-            "ticket": {"name": "🎫-tickets", "title": "Support Ticket", "desc": "Cliquez ci-dessous pour ouvrir un ticket.", "btn": "Ouvrir un Ticket", "emoji": "📩"},
-            "report": {"name": "🚨-report", "title": "Signalement", "desc": "Signalez un comportement inapproprié.", "btn": "Faire un Signalement", "emoji": "⚠️"},
-            "signalement": {"name": "🛑-plaintes", "title": "Plaintes", "desc": "Déposez une plainte formelle.", "btn": "Déposer une Plainte", "emoji": "📝"},
-            "suggestion": {"name": "💡-suggestions", "title": "Boîte à Idées", "desc": "Proposez vos améliorations !", "btn": "Faire une Suggestion", "emoji": "💡"}
-        }
-        conf = configs.get(self.system_type)
-        if not conf: return await interaction.followup.send("Type de système inconnu.", ephemeral=True)
-
-        try:
-            channel = await interaction.guild.create_text_channel(name=conf['name'], category=category)
-            custom_json = db.get('default_embeds', {}).get(self.system_type)
-            if custom_json:
-                try: embed = discord.Embed.from_dict(json.loads(custom_json))
-                except: embed = discord.Embed(title=conf['title'], description=conf['desc'], color=NEON_BLUE)
-            else:
-                embed = discord.Embed(title=conf['title'], description=conf['desc'], color=NEON_BLUE)
-            
-            view = GenericTicketView(self.system_type, conf['btn'], conf['emoji'])
-            await channel.send(embed=embed, view=view)
-            db['settings'][f'{self.system_type}_config'] = {"channel_id": channel.id, "category_id": category.id}
-            save_data(db)
-            await interaction.followup.send(f"✅ Système **{self.system_type}** installé dans {channel.mention}.", ephemeral=True)
-        except Exception as e: await interaction.followup.send(f"Erreur : {e}", ephemeral=True)
-
-class TicketsSupportView(View):
-    def __init__(self):
-        super().__init__(timeout=180)
-    @discord.ui.button(label="Panel Ticket", style=discord.ButtonStyle.secondary, emoji="🎟️", row=0)
-    async def ticket_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Configuration Ticket :", view=SystemSetupView("ticket"), ephemeral=True)
-    @discord.ui.button(label="Panel Report", style=discord.ButtonStyle.secondary, emoji="🚨", row=0)
-    async def report_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Configuration Report :", view=SystemSetupView("report"), ephemeral=True)
-    @discord.ui.button(label="Panel Signalement", style=discord.ButtonStyle.secondary, emoji="🎯", row=1)
-    async def signalement_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Configuration Signalement :", view=SystemSetupView("signalement"), ephemeral=True)
-    @discord.ui.button(label="Panel Suggestion", style=discord.ButtonStyle.secondary, emoji="💡", row=1)
-    async def suggestion_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Configuration Suggestion :", view=SystemSetupView("suggestion"), ephemeral=True)
-
-# ==================================================================================================
-# 23. EMBED BUILDER
-# ==================================================================================================
-
-class EmbedJSONModal(Modal, title="Importer Embed depuis JSON"):
-    json_data = TextInput(label="Code JSON (Discohook)", style=discord.TextStyle.paragraph, placeholder='{"title": "...", "description": "..."}', required=True)
-    content_input = TextInput(label="Texte hors embed (@everyone...)", placeholder="Message normal au dessus de l'embed", required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        user_id = str(interaction.user.id)
-        try:
-            data = json.loads(self.json_data.value)
-            embed_data = data['embeds'][0] if 'embeds' in data and isinstance(data['embeds'], list) and len(data['embeds']) > 0 else (data if 'title' in data or 'description' in data else {})
-            content = self.content_input.value.strip() or (data.get('content') if not self.content_input.value.strip() else "")
-            
-            db['embed_builders'][user_id] = {"type": "json", "content": content, "data": embed_data, "reactions": db['embed_builders'].get(user_id, {}).get("reactions", [])}
-            save_data(db)
-            await interaction.followup.send("✅ JSON importé.", ephemeral=True)
-            await interaction.message.edit(embed=EmbedBuilderView.generate_preview(user_id), view=EmbedBuilderView(user_id))
-        except: await interaction.followup.send("❌ JSON Invalide.", ephemeral=True)
-
-class EmbedSimpleModal(Modal, title="Créateur Simple"):
-    title_input = TextInput(label="Titre")
-    desc_input = TextInput(label="Description", style=discord.TextStyle.paragraph)
-    color_input = TextInput(label="Couleur (Hex)", default="#6441a5")
-    content_input = TextInput(label="Texte hors embed", required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        user_id = str(interaction.user.id)
-        try: color_val = int(self.color_input.value.replace("#", ""), 16)
-        except: color_val = NEON_PURPLE
-        embed_data = {"title": self.title_input.value, "description": self.desc_input.value, "color": color_val}
-        db['embed_builders'][user_id] = {"type": "simple", "content": self.content_input.value.strip(), "data": embed_data, "reactions": db['embed_builders'].get(user_id, {}).get("reactions", [])}
-        save_data(db)
-        await interaction.followup.send("✅ Données mises à jour.", ephemeral=True)
-        await interaction.message.edit(embed=EmbedBuilderView.generate_preview(user_id), view=EmbedBuilderView(user_id))
-
-class ReactionRoleSelectView(View):
-    def __init__(self, user_id, text, emoji, view_ref):
-        super().__init__(timeout=180)
-        self.user_id = user_id; self.text = text; self.emoji = emoji; self.view_ref = view_ref
-        self.role_select = discord.ui.RoleSelect(placeholder="Choisissez le rôle...")
-        self.role_select.callback = self.cb
-        self.add_item(self.role_select)
-    async def cb(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        role = self.role_select.values[0]
-        user_id_str = str(self.user_id)
-        builder = db['embed_builders'].get(user_id_str)
-        if not builder: return await interaction.followup.send("Session expirée.", ephemeral=True)
-        builder.setdefault('reactions', []).append({"text": self.text, "emoji": self.emoji, "role_id": role.id})
-        save_data(db)
-        await interaction.followup.send(f"✅ Rôle {role.mention} lié à {self.emoji}.", ephemeral=True)
-        await interaction.edit_original_response(content="Menu Principal", embed=EmbedBuilderView.generate_preview(user_id_str), view=EmbedBuilderView(user_id_str))
-
-class ReactionAddModal(Modal, title="Ajouter une Réaction"):
-    def __init__(self, view_ref):
-        super().__init__(); self.view_ref = view_ref
-    emoji_input = TextInput(label="Emoji", placeholder="👻")
-    text_input = TextInput(label="Description", placeholder="Cliquez...", required=False)
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.send_message("Choisissez le rôle :", view=ReactionRoleSelectView(interaction.user.id, self.text_input.value, self.emoji_input.value.strip(), self.view_ref), ephemeral=True)
-
-class ChannelPickView(View):
-    def __init__(self, user_id):
-        super().__init__(timeout=60); self.user_id = str(user_id)
-        self.channel_select = discord.ui.ChannelSelect(channel_types=[discord.ChannelType.text, discord.ChannelType.news])
-        self.channel_select.callback = self.on_select
-        self.add_item(self.channel_select)
-    async def on_select(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        channel = self.channel_select.values[0]
-        builder = db['embed_builders'].get(self.user_id)
-        if not builder: return await interaction.followup.send("Données introuvables.", ephemeral=True)
-        try:
-            embed_dict = sanitize_embed_json(builder['data'])
-            embed = discord.Embed.from_dict(embed_dict)
-            if builder.get('reactions'):
-                desc_add = "\n\n" + "\n".join([f"{r['emoji']} : {r['text']}" for r in builder['reactions'] if r['text']])
-                if len(desc_add) > 2: embed.description = (embed.description or "") + desc_add
-            
-            message = await channel.send(content=builder.get('content') or None, embed=embed)
-            if builder.get('reactions'):
-                reaction_map = {}
-                for react in builder['reactions']:
-                    try:
-                        await message.add_reaction(react['emoji'])
-                        reaction_map[react['emoji']] = react['role_id']
-                    except: pass
-                db.setdefault('reaction_role_messages', {})[str(message.id)] = reaction_map
-                save_data(db)
-            await interaction.followup.send(f"✅ Publié dans {channel.mention} !", ephemeral=True)
-            del db['embed_builders'][self.user_id]
-            save_data(db)
-        except Exception as e: await interaction.followup.send(f"❌ Erreur : {e}", ephemeral=True)
-
-class EmbedBuilderView(View):
-    def __init__(self, user_id):
-        super().__init__(timeout=None); self.user_id = str(user_id)
-    
-    @staticmethod
-    def generate_preview(user_id):
-        builder = db['embed_builders'].get(str(user_id))
-        if not builder: return discord.Embed(title="Aucun brouillon", description="Commencez par importer un JSON.", color=discord.Color.light_grey())
-        try:
-            data = builder['data'].copy()
-            embed = discord.Embed.from_dict(data)
-            embed.set_footer(text="Prévisualisation")
-            if builder.get('reactions'):
-                val = "\n".join([f"{r['emoji']} ➡️ <@&{r['role_id']}>" for r in builder['reactions']])
-                embed.add_field(name="Rôles-Réactions", value=val, inline=False)
-            return embed
-        except: return discord.Embed(title="Erreur Preview", color=discord.Color.red())
-
-    @discord.ui.button(label="JSON", style=discord.ButtonStyle.secondary, emoji="📥", row=0)
-    async def imp_json(self, interaction: discord.Interaction, button: Button): await interaction.response.send_modal(EmbedJSONModal())
-    @discord.ui.button(label="Simple", style=discord.ButtonStyle.secondary, emoji="✏️", row=0)
-    async def ed_simple(self, interaction: discord.Interaction, button: Button): await interaction.response.send_modal(EmbedSimpleModal())
-    @discord.ui.button(label="Réaction", style=discord.ButtonStyle.primary, emoji="🎭", row=1)
-    async def add_r(self, interaction: discord.Interaction, button: Button): await interaction.response.send_modal(ReactionAddModal(self))
-    @discord.ui.button(label="Rafraîchir", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
-    async def refresh(self, interaction: discord.Interaction, button: Button): await interaction.response.edit_message(embed=self.generate_preview(interaction.user.id), view=self)
-    @discord.ui.button(label="Publier", style=discord.ButtonStyle.success, emoji="✅", row=2)
-    async def pub(self, interaction: discord.Interaction, button: Button): await interaction.response.send_message("Destination :", view=ChannelPickView(interaction.user.id), ephemeral=True)
-
-class EmbedPanelPermanentView(View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Ouvrir Créateur", style=discord.ButtonStyle.primary, emoji="🛠️", custom_id="open_embed_builder")
-    async def open(self, interaction: discord.Interaction, button: Button):
-        user_id = str(interaction.user.id)
-        if user_id not in db['embed_builders']: db['embed_builders'][user_id] = {}
-        await interaction.response.send_message(embed=EmbedBuilderView.generate_preview(user_id), view=EmbedBuilderView(user_id), ephemeral=True)
-
-# --- COMMANDES DE DÉPLOIEMENT ---
-
-panel_group = app_commands.Group(name="setup_panel", description="Installer les panels permanents.", default_permissions=discord.Permissions(administrator=True))
-panel_conf_group = app_commands.Group(name="panel_config", description="Configurer les boutons.", default_permissions=discord.Permissions(administrator=True))
-embed_group = app_commands.Group(name="embed", description="Outils d'embed.", default_permissions=discord.Permissions(administrator=True))
-
-class AdminHelpPanelView(View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="Aide Admin", style=discord.ButtonStyle.primary, emoji="📚", custom_id="admin_help_open")
-    async def open(self, interaction: discord.Interaction, button: Button): await send_admin_help_logic(interaction)
-
-@panel_group.command(name="moderation", description="Poste le panel de modération.")
-async def setup_mod_panel(interaction: discord.Interaction):
-    await interaction.channel.send(embed=discord.Embed(title="🛡️ Modération", color=DARK_RED), view=ModerationPanelView())
-    await interaction.response.send_message("✅ Panel Modération posté !", ephemeral=True)
-
-@panel_group.command(name="config", description="Poste le panel de configuration.")
-async def setup_conf_panel(interaction: discord.Interaction):
-    await interaction.channel.send(embed=discord.Embed(title="⚙️ Configuration", color=NEON_BLUE), view=ConfigPanelView())
-    await interaction.response.send_message("✅ Panel Config posté !", ephemeral=True)
-
-@panel_group.command(name="players", description="Poste le panel joueurs.")
-async def setup_play_panel(interaction: discord.Interaction):
-    await interaction.channel.send(embed=discord.Embed(title="🎮 Espace Joueurs", color=NEON_GREEN), view=PlayerPanelView())
-    await interaction.response.send_message("✅ Panel Joueurs posté !", ephemeral=True)
-
-@panel_group.command(name="admin_help", description="Poste le panel d'aide admin.")
-async def setup_admin_help(interaction: discord.Interaction):
-    await interaction.channel.send(embed=discord.Embed(title="📚 Aide Admin", color=NEON_PURPLE), view=AdminHelpPanelView())
-    await interaction.response.send_message("✅ Panel Aide Admin posté !", ephemeral=True)
-
-@embed_group.command(name="setup_panel", description="Poste le panel de création d'embed.")
-async def embed_setup(interaction: discord.Interaction):
-    await interaction.channel.send(embed=discord.Embed(title="🛠️ Créateur d'Embeds", description="Cliquez pour ouvrir l'outil.", color=NEON_BLUE), view=EmbedPanelPermanentView())
-    await interaction.response.send_message("✅ Panel Embed posté !", ephemeral=True)
-
-@app_commands.command(name="ticket", description="Installer le panel Ticket.")
-@app_commands.default_permissions(administrator=True)
-async def ticket_cmd(interaction: discord.Interaction): await interaction.response.send_message("Config Ticket :", view=SystemSetupView("ticket"), ephemeral=True)
-
-@app_commands.command(name="report", description="Installer le panel Report.")
-@app_commands.default_permissions(administrator=True)
-async def report_cmd(interaction: discord.Interaction): await interaction.response.send_message("Config Report :", view=SystemSetupView("report"), ephemeral=True)
-
-@app_commands.command(name="annonce", description="Faire une annonce.")
-@app_commands.default_permissions(administrator=True)
-async def annonce(interaction: discord.Interaction, titre: str, message: str, image: str = None):
-    embed = discord.Embed(title=titre, description=message, color=RETRO_ORANGE)
-    if image: embed.set_image(url=image)
-    embed.set_footer(text=f"Par {interaction.user.display_name}")
-    await interaction.channel.send(embed=embed)
-    await interaction.response.send_message("✅ Annonce publiée !", ephemeral=True)
-
-
-# ==================================================================================================
-# 24. CLASSE CLIENT DISCORD (FUSIONNÉE)
-# ==================================================================================================
-
-class PoxelClient(discord.Client):
-    def __init__(self, *, intents: discord.Intents):
-        super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)
-        self.persistent_views_added = False
-        self.last_member_count_update = {}
-
-    async def setup_hook(self):
-        """Enregistrement des commandes et synchronisation."""
-        # Ajout des groupes de commandes
-        self.tree.add_command(birthday_group)
-        self.tree.add_command(birthday_admin_group)
-        self.tree.add_command(notif_group)
-        self.tree.add_command(freegames_group)
-        self.tree.add_command(cineconfig_group)
-        self.tree.add_command(team_group)
-        self.tree.add_command(avatar_group)
-        self.tree.add_command(topweek_admin_group)
-        self.tree.add_command(adminxp_group)
-        self.tree.add_command(voice_config_group)
-        self.tree.add_command(panel_group)
-        self.tree.add_command(panel_conf_group)
-        self.tree.add_command(embed_group)
-        self.tree.add_command(membercount_group)
-
-        # Ajout des commandes isolées (définies globalement avec @app_commands.command)
-        # Économie / Utilitaires
-        self.tree.add_command(ping)
-        self.tree.add_command(rank)
-        self.tree.add_command(birthdaylist)
-        self.tree.add_command(nextbirthday)
-        self.tree.add_command(free)
-        self.tree.add_command(cmd_news_series)
-        self.tree.add_command(cmd_news_anime)
-        self.tree.add_command(cmd_news_cartoons)
-        self.tree.add_command(cmd_news_movies)
-        self.tree.add_command(cmd_episodes_series)
-        self.tree.add_command(cmd_episodes_anime)
-        self.tree.add_command(cmd_episodes_cartoons)
-        self.tree.add_command(admin_test_news)
-        self.tree.add_command(config_listener)
-        self.tree.add_command(reset_listener)
-        self.tree.add_command(rewards)
-        self.tree.add_command(admin_sync)
-        self.tree.add_command(teamlist)
-        self.tree.add_command(poxel_help) # poxel_help admin
-        self.tree.add_command(help_joueur) # poxel_help_joueur
-        self.tree.add_command(avatar_config_panel)
-
-        # Modération
-        self.tree.add_command(ban)
-        self.tree.add_command(tempban)
-        self.tree.add_command(kick)
-        self.tree.add_command(mute)
-        self.tree.add_command(unmute)
-        self.tree.add_command(warn)
-        self.tree.add_command(unban)
-        self.tree.add_command(infractions)
-        self.tree.add_command(clear_all_infractions)
-        self.tree.add_command(clear)
-        self.tree.add_command(slowmode)
-        self.tree.add_command(vies)
-        self.tree.add_command(config) # Main config panel
-        self.tree.add_command(vocal_cmd)
-        self.tree.add_command(annonce)
-        self.tree.add_command(ticket_cmd)
-        self.tree.add_command(report_cmd)
-        self.tree.add_command(signalement_cmd)
-        self.tree.add_command(suggestion_cmd)
-        self.tree.add_command(config_embed_system)
-        
-        # Synchronisation
-        try:
-            await self.tree.sync()
-            logger.info(f"Commandes synchronisées avec succès.")
-        except Exception as e:
-            logger.error(f"Erreur sync commandes: {e}")
-
-    async def on_ready(self):
-        logger.info(f"Connecté en tant que {self.user.name} ({self.user.id})")
-        logger.info(f"Latence: {round(self.latency * 1000)}ms | Serveurs: {len(self.guilds)}")
-
-        # Chargement des Assets Graphiques
-        if PIL_AVAILABLE: download_and_cache_assets()
-
-        # Initialisation des Vues Persistantes (Pour que les boutons marchent après reboot)
-        if not self.persistent_views_added:
-            self.add_view(RulesAcceptView(self))
-            self.add_view(VoiceDashboardView())
-            self.add_view(ModerationPanelView())
-            self.add_view(ConfigPanelView())
-            self.add_view(PlayerPanelView())
-            self.add_view(EmbedPanelPermanentView())
-            self.add_view(AdminHelpPanelView())
-            self.add_view(AvatarConfigView(self))
-            self.persistent_views_added = True
-            logger.info("Vues persistantes chargées.")
-
-        # Démarrage des Tâches de Fond (Economy + Modération)
-        tasks_to_start = [
-            check_birthdays, check_free_games_task, check_cine_news_task,
-            weekly_xp_reset, post_weekly_leaderboard, backup_xp_data,
-            check_avatar_revert, check_unbans, check_unmutes,
-            check_infraction_purge, check_member_count,
-            check_youtube_loop, check_other_platforms_loop
-        ]
-        
-        for task in tasks_to_start:
-            if not task.is_running():
-                task.start(self) # On passe 'self' comme argument client_ref
-
-    async def try_update_member_count(self, guild: discord.Guild):
-        """Met à jour le compteur de membres avec anti-spam."""
-        now = datetime.datetime.now().timestamp()
-        last_update = self.last_member_count_update.get(guild.id, 0)
-        if now - last_update > 300: # 5 minutes cooldown
-            self.last_member_count_update[guild.id] = now
-            await update_member_count_channel(guild)
-
-    # --- ÉVÉNEMENTS MEMBRES ---
-
-    async def on_member_join(self, member: discord.Member):
-        logger.info(f"+ {member.name} a rejoint {member.guild.name}.")
-        settings = db.get("settings", {})
-
-        # 1. Message de Bienvenue (Salon)
-        channel_id = settings.get("welcome_channel_id")
-        if channel_id:
-            channel = member.guild.get_channel(channel_id)
-            if channel:
-                welcome_raw = settings.get("welcome_message", "Bienvenue {user} !")
-                # Support JSON ou Texte Simple
-                try:
-                    if welcome_raw.strip().startswith("{"):
-                        data = json.loads(welcome_raw)
-                        replacements = {"{user}": member.mention, "{user.name}": member.name, "{guild}": member.guild.name, "{member_count}": str(member.guild.member_count)}
-                        data = recursive_replace(data, replacements)
-                        if 'content' in data: 
-                            await channel.send(content=data['content'])
-                        if 'embeds' in data and data['embeds']:
-                            await channel.send(embed=discord.Embed.from_dict(data['embeds'][0]))
-                    else:
-                        # Fallback Style Simple Poxel
-                        content = welcome_raw.replace("{user}", member.mention).replace("{guild.name}", member.guild.name).replace("{member_count}", str(member.guild.member_count))
-                        embed = discord.Embed(description=content, color=NEON_GREEN)
-                        embed.set_thumbnail(url=member.display_avatar.url)
-                        embed = apply_embed_styles(embed, "welcome")
-                        await channel.send(embed=embed)
-                except Exception as e: logger.error(f"Erreur Welcome: {e}")
-
-        # 2. Message Privé (DM)
-        dm_config = settings.get('welcome_dm', {})
-        if dm_config.get('enabled', False):
-            try:
-                json_raw = dm_config.get('json_data')
-                embed_dm = None
-                if json_raw:
-                    try:
-                        data = json.loads(json_raw)
-                        replacements = {"{user}": member.mention, "{user.name}": member.name, "{guild}": member.guild.name}
-                        data = recursive_replace(data, replacements)
-                        embed_dm = discord.Embed.from_dict(data['embeds'][0] if 'embeds' in data else data)
-                    except: pass
-                
-                if not embed_dm:
-                    # Fallback Simple
-                    title = dm_config.get('title', 'Bienvenue !').replace('{guild}', member.guild.name)
-                    desc = dm_config.get('description', 'Salut {user} !').replace('{user}', member.mention)
-                    col = int(dm_config.get('color', hex(NEON_GREEN)).replace("#", ""), 16)
-                    embed_dm = discord.Embed(title=title, description=desc, color=col)
-                    if dm_config.get('image_url'): embed_dm.set_image(url=dm_config.get('image_url'))
-                
-                await member.send(embed=embed_dm)
-            except: pass
-
-        # 3. Triggers
-        await trigger_avatar_change('member_join')
-        await self.try_update_member_count(member.guild)
-
-    async def on_member_remove(self, member: discord.Member):
-        logger.info(f"- {member.name} a quitté {member.guild.name}.")
-        settings = db.get("settings", {})
-
-        # 1. Message de Départ
-        channel_id = settings.get("farewell_channel_id")
-        if channel_id:
-            channel = member.guild.get_channel(channel_id)
-            if channel:
-                farewell_raw = settings.get("farewell_message", "Au revoir {user}.")
-                try:
-                    if farewell_raw.strip().startswith("{"):
-                        data = json.loads(farewell_raw)
-                        replacements = {"{user}": member.name, "{guild}": member.guild.name}
-                        data = recursive_replace(data, replacements)
-                        if 'embeds' in data: await channel.send(embed=discord.Embed.from_dict(data['embeds'][0]))
-                    else:
-                        content = farewell_raw.replace("{user}", member.display_name)
-                        embed = discord.Embed(description=content, color=DARK_RED)
-                        embed.set_thumbnail(url=member.display_avatar.url)
-                        embed = apply_embed_styles(embed, "farewell")
-                        await channel.send(embed=embed)
-                except: pass
-
-        # 2. Triggers
-        await trigger_avatar_change('member_remove')
-        await self.try_update_member_count(member.guild)
-
-    # --- ÉVÉNEMENTS VOCAUX ---
-
-    async def on_voice_state_update(self, member, before, after):
-        # Création de Hub
-        if after.channel and str(after.channel.id) in db.get('voice_hubs', {}):
-            hub_data = db['voice_hubs'][str(after.channel.id)]
-            try:
-                cat = after.channel.category
-                tname = f"🎧 Salon de {member.display_name}"
-                new_chan = await cat.create_voice_channel(name=tname, user_limit=hub_data.get('limit', 0))
-                db['temp_channels'][str(new_chan.id)] = {'owner_id': member.id, 'trusted': [], 'blocked': []}
-                save_data(db)
-                await member.move_to(new_chan)
-                await trigger_avatar_change('channel_create')
-            except Exception as e: logger.error(f"Erreur Voice Hub: {e}")
-
-        # Suppression de Salon Vide
-        if before.channel and str(before.channel.id) in db.get('temp_channels', {}) and not before.channel.members:
-            try:
-                await before.channel.delete()
-                del db['temp_channels'][str(before.channel.id)]
-                save_data(db)
-                await trigger_avatar_change('channel_delete')
-            except: pass
-
-    # --- ÉVÉNEMENTS MESSAGE (Le Gros Morceau) ---
-
-    async def on_message(self, message: discord.Message):
-        if not message.guild or message.author.bot: return
-        settings = db.get("settings", {})
-
-        # 1. CENSURE
-        if settings.get("censor_enabled", True) and not message.author.guild_permissions.administrator:
-            clean, censored = censor_text(message.content, settings.get("censored_words", []))
-            if censored:
-                try:
-                    await message.delete()
-                    # Webhook imitation
-                    whs = await message.channel.webhooks()
-                    wh = whs[0] if whs else await message.channel.create_webhook(name="PoxelCensor")
-                    await wh.send(content=clean, username=message.author.display_name, avatar_url=message.author.display_avatar.url)
-                    return # Stop processing here
-                except: pass
-
-        # 2. AUTO-MOD (Nova-Guard)
-        if settings.get("auto_mod_enabled", True) and not message.author.guild_permissions.administrator:
-            norm_content = normalize_text(message.content)
-            triggered = None
-            
-            # Vérification cooldown utilisateur
-            uid = str(message.author.id)
-            now_ts = time.time()
-            last_trig = db.get('user_auto_mod_cooldown', {}).get(uid, 0)
-            
-            for pname, pdata in db.get('auto_mod_profiles', {}).items():
-                if now_ts - last_trig < pdata.get('cooldown_seconds', 0): continue
-                
-                for kw in pdata.get('keywords', []):
-                    if normalize_text(kw) in norm_content:
-                        triggered = (pname, pdata)
-                        break
-                if triggered: break
-            
-            if triggered:
-                pname, pdata = triggered
-                db.setdefault('user_auto_mod_cooldown', {})[uid] = now_ts
-                
-                actions = pdata.get('actions', [])
-                if actions:
-                    act = actions[0] # Premier action définie
-                    atype = act.get('type')
-                    pts = act.get('points', 1)
-                    reason = f"Nova-Guard: {pname}"
-                    
-                    # Application Sanction
-                    try: await message.delete()
-                    except: pass
-                    
-                    if atype == 'warn':
-                        await poxel_warn_logic(message, message.author, reason, pts)
-                    elif atype == 'mute':
-                        dur = act.get('duration', '5m')
-                        await poxel_mute_logic(message, message.author, dur, reason, pts)
-                    elif atype == 'kick':
-                        await poxel_kick_logic(message, message.author, reason, pts)
-                    elif atype == 'ban':
-                        await poxel_ban_logic(message, message.author, reason, pts)
-                    
-                    # Logs
-                    log_id = settings.get("auto_mod_log_channel_id")
-                    if log_id:
-                        ch = self.get_channel(log_id)
-                        if ch: await ch.send(f"🛡️ **Auto-Mod** ({pname}) sur {message.author.mention} : {atype.upper()}")
-                    return
-
-        # 3. SYSTÈME XP (Economy)
-        user_data = get_user_xp_data(message.author.id)
-        now = get_adjusted_time()
-        xp_conf = settings.get("level_up_rewards", {})
-        
-        # Cooldown XP
-        can_xp = True
-        last_ts = user_data.get("last_message_timestamp")
-        if last_ts:
-            try:
-                ltime = datetime.datetime.fromisoformat(last_ts).replace(tzinfo=SERVER_TIMEZONE)
-                if now < ltime + datetime.timedelta(minutes=xp_conf.get("xp_gain_cooldown_minutes", 1)):
-                    can_xp = False
-            except: pass
-        
-        if can_xp:
-            gain = random.randint(xp_conf.get("xp_gain_per_message", {}).get("min", 15), xp_conf.get("xp_gain_per_message", {}).get("max", 25))
-            user_data["last_message_timestamp"] = now.isoformat()
-            await update_user_xp(message.author.id, gain)
-            await check_and_handle_progression(message.author, message.channel)
-            save_data(db)
-
-        # 4. ÉCOUTE BOTS (Mod/Event Listeners)
-        # Logique pour détecter les embeds d'autres bots (ex: Carl-bot, etc.) et donner de l'XP
-        listener = settings.get("mod_listener_settings", {})
-        if listener.get("enabled", True) and message.embeds:
-            mod_ch = listener.get("mod_bot_channel_id")
-            evt_ch = listener.get("event_bot_channel_id")
-            
-            if message.channel.id in [mod_ch, evt_ch]:
-                emb = message.embeds[0]
-                target = None
-                xp_val = 0
-                
-                # Extraction ID (Regex)
-                txt = (emb.description or "") + (emb.footer.text if emb.footer else "")
-                ids = re.findall(r'(\d{17,19})', txt)
-                if ids:
-                    target = message.guild.get_member(int(ids[0]))
-                
-                if target:
-                    # Logique Event (Victoire)
-                    if message.channel.id == evt_ch and "vainqueur" in (emb.description or "").lower():
-                        xp_val = listener.get("xp_reward", {}).get("tournament_win", 200)
-                    
-                    # Logique Sanction (Pénalité XP)
-                    elif message.channel.id == mod_ch:
-                        title = (emb.title or "").lower()
-                        penalties = listener.get("xp_penalty", {})
-                        for k, v in penalties.items():
-                            if k in title: 
-                                xp_val = v
-                                break
-                    
-                    if xp_val != 0:
-                        await update_user_xp(target.id, xp_val, is_weekly_xp=(xp_val > 0))
-                        save_data(db)
-                        logger.info(f"Listener XP: {target.name} {xp_val:+d} XP.")
-
-    # --- ÉVÉNEMENTS RÉACTIONS (Rôles) ---
-
-    async def on_raw_reaction_add(self, payload):
-        if payload.user_id == self.user.id: return
-        msg_id = str(payload.message_id)
-        conf = db.get('reaction_role_messages', {}).get(msg_id)
-        if conf and str(payload.emoji) in conf:
-            guild = self.get_guild(payload.guild_id)
-            member = guild.get_member(payload.user_id)
-            role = guild.get_role(conf[str(payload.emoji)])
-            if member and role: 
-                try: await member.add_roles(role)
-                except: pass
-
-    async def on_raw_reaction_remove(self, payload):
-        if payload.user_id == self.user.id: return
-        msg_id = str(payload.message_id)
-        conf = db.get('reaction_role_messages', {}).get(msg_id)
-        if conf and str(payload.emoji) in conf:
-            guild = self.get_guild(payload.guild_id)
-            member = guild.get_member(payload.user_id)
-            role = guild.get_role(conf[str(payload.emoji)])
-            if member and role: 
-                try: await member.remove_roles(role)
-                except: pass
-
-
-# ==================================================================================================
-# 25. COMMANDES DE SYNCHRONISATION ET AIDE ADMIN
-# ==================================================================================================
-
-# --- Commande de Synchronisation Manuelle (Admin) ---
-@app_commands.command(name="admin_sync", description="[Admin] Force la synchronisation des commandes avec Discord.")
-@app_commands.default_permissions(administrator=True)
-async def admin_sync(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        synced = await interaction.client.tree.sync()
-        command_names = [c.name for c in synced]
-        await interaction.followup.send(f"✅ **Synchronisation réussie !**\n**{len(synced)} commandes actives :**\n`{', '.join(command_names)}`", ephemeral=True)
-    except Exception as e:
-        logger.exception(f"Erreur Sync Manuelle: {e}")
-        await interaction.followup.send(f"❌ Erreur lors de la synchronisation : `{e}`", ephemeral=True)
-
-# --- Commande Aide Admin (Globale) ---
-@app_commands.command(name="poxel_help", description="Affiche le panneau d'aide administrateur.")
-@app_commands.default_permissions(administrator=True)
-async def poxel_help(interaction: discord.Interaction):
-    await send_admin_help_logic(interaction)
-
-# --- Commande Aide Joueur (Globale) ---
-@app_commands.command(name="poxel_help_joueur", description="Affiche le panneau d'aide pour les joueurs.")
-async def help_joueur(interaction: discord.Interaction):
-    await send_player_help_logic(interaction)
-
-# ==================================================================================================
-# 26. DÉMARRAGE DU BOT
-# ==================================================================================================
-
 if __name__ == "__main__":
-    # 1. Vérification du Token
+    # Démarre le serveur Flask sur un thread séparé pour garder le bot en vie sur les hébergeurs
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
     DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
     if not DISCORD_TOKEN:
-        logger.critical("ERREUR CRITIQUE: La variable 'DISCORD_TOKEN' est introuvable dans le fichier .env.")
-        logger.critical("Le bot ne peut pas démarrer sans son token.")
+        logger.critical("ERREUR: Token Discord non trouvé dans .env.")
         sys.exit(1)
 
-    # 2. Lancement du Serveur Web (Flask) pour le ping (Hébergement)
-    # Le serveur tourne sur un thread séparé pour ne pas bloquer le bot
+    # Lancer le bot Discord
     try:
-        flask_thread = Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        logger.info("Serveur Flask démarré en arrière-plan (Port 8080).")
-    except Exception as e:
-        logger.error(f"Erreur lors du démarrage du serveur Flask: {e}")
-
-    # 3. Initialisation et Lancement du Client Discord
-    # Les intents sont définis au tout début (Partie 1)
-    client = PoxelClient(intents=intents)
-
-    try:
-        logger.info("Tentative de connexion aux passerelles Discord...")
+        logger.info("Lancement du client Discord...")
         
-        # Debug optionnel : Afficher les commandes enregistrées avant le run (localement)
-        # Note : Cela n'affiche que les commandes ajoutées via @client.tree.command (pas les groupes dans setup_hook)
-        # cmds = client.tree.get_commands()
-        # logger.info(f"Commandes pré-chargées : {[c.name for c in cmds]}")
+        # Debug: Lister les commandes enregistrées AVANT le run
+        cmds = client.tree.get_commands()
+        cmd_names = [c.name for c in cmds]
+        logger.info(f"Commandes locales enregistrées ({len(cmds)}) : {cmd_names}")
 
-        client.run(DISCORD_TOKEN, log_handler=None) # On utilise notre propre logger configuré en Partie 1
-
+        client.run(DISCORD_TOKEN, log_handler=None)
     except discord.errors.LoginFailure:
-        logger.critical("ERREUR D'AUTHENTIFICATION: Le token Discord fourni est invalide.")
-        logger.critical("Veuillez vérifier le fichier .env et régénérer le token si nécessaire.")
+        logger.critical("ERREUR: Token Discord invalide. Veuillez vérifier votre token.")
     except discord.errors.PrivilegedIntentsRequired:
-        logger.critical("ERREUR D'INTENTS: Les 'Privileged Intents' (Presence, Server Members, Message Content) ne sont pas activés.")
-        logger.critical("Allez sur le Portail Développeur Discord -> Bot -> Privileged Gateway Intents et activez-les tous.")
+        logger.critical("ERREUR: Intents privilégiés (Présence, Membres) requis mais non activés sur le portail développeur Discord.")
     except Exception as e:
-        logger.exception(f"Erreur fatale inattendue lors de l'exécution du bot: {e}")
+        logger.exception(f"Erreur fatale lors du lancement ou de l'exécution du client Discord: {e}")
     finally:
-        logger.info("Arrêt du processus Poxel.")
+        logger.info("Arrêt du bot.")
+
