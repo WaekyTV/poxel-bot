@@ -2260,64 +2260,469 @@ async def panel_custom(interaction: discord.Interaction, json_data: str):
     except json.JSONDecodeError:
         await interaction.response.send_message("❌ JSON invalide.", ephemeral=True)
 
-# --- PANEL ADMIN ---
+# --- MODALS POUR LES BOUTONS ---
+
+class RankBackgroundModal(Modal, title="Changer le Fond Rank"):
+    url_input = TextInput(label="URL de l'image (PNG/JPG)", placeholder="https://...", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        url = self.url_input.value.strip()
+        if not url.startswith("http"):
+            await interaction.response.send_message("❌ URL invalide.", ephemeral=True)
+            return
+        
+        user_data = get_user_xp_data(interaction.user.id)
+        user_data["rank_bg_url"] = url
+        save_data(db)
+        await interaction.response.send_message(f"✅ Image de fond mise à jour !", ephemeral=True)
+
+class GiveXPModal(Modal, title="Donner de l'XP"):
+    user_id_input = TextInput(label="ID du membre", placeholder="Ex: 123456789...", required=True)
+    amount_input = TextInput(label="Montant XP", placeholder="Ex: 100", required=True)
+    reason_input = TextInput(label="Raison", placeholder="Event...", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.user_id_input.value)
+            amount = int(self.amount_input.value)
+            reason = self.reason_input.value
+            
+            member = interaction.guild.get_member(target_id)
+            if not member:
+                await interaction.response.send_message("❌ Membre introuvable sur ce serveur.", ephemeral=True)
+                return
+            
+            await update_user_xp(target_id, amount, is_weekly_xp=(amount > 0))
+            save_data(db)
+            await check_and_handle_progression(member, interaction.channel)
+
+            await interaction.response.send_message(f"✅ {amount:+d} XP ajusté pour {member.mention}. Raison: {reason}", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ ID ou Montant invalide.", ephemeral=True)
+
+class SetLevelModal(Modal, title="Définir le Niveau"):
+    user_id_input = TextInput(label="ID du membre", placeholder="Ex: 123456789...", required=True)
+    level_input = TextInput(label="Niveau", placeholder="Ex: 10", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.user_id_input.value)
+            level = int(self.level_input.value)
+            if level < 1: raise ValueError
+            
+            member = interaction.guild.get_member(target_id)
+            if not member:
+                await interaction.response.send_message("❌ Membre introuvable.", ephemeral=True)
+                return
+
+            user_data = get_user_xp_data(target_id)
+            user_data["level"] = level
+            user_data["xp"] = 0
+            user_data["weekly_xp"] = 0
+            save_data(db)
+            await interaction.response.send_message(f"✅ Niveau de {member.mention} défini sur **{level}**.", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ Données invalides.", ephemeral=True)
+
+class RewardsConfigModal(Modal, title="Config Récompenses"):
+    level_input = TextInput(label="Niveau Requis", placeholder="Ex: 5", required=False)
+    role_id_input = TextInput(label="ID Rôle (Optionnel)", placeholder="Ex: 123456...", required=False)
+    channel_id_input = TextInput(label="ID Salon Notif (Optionnel)", placeholder="Ex: 123456...", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        settings = db.setdefault("settings", {}).setdefault("level_up_rewards", {})
+        changes = []
+        
+        try:
+            if self.channel_id_input.value:
+                chan_id = int(self.channel_id_input.value)
+                settings["notification_channel_id"] = chan_id
+                changes.append("Salon d'annonce mis à jour.")
+            
+            if self.level_input.value and self.role_id_input.value:
+                lvl = int(self.level_input.value)
+                rid = int(self.role_id_input.value)
+                settings.setdefault("role_rewards", {})[str(lvl)] = str(rid)
+                changes.append(f"Rôle défini pour niveau {lvl}.")
+            
+            save_data(db)
+            await interaction.response.send_message("✅ " + " ".join(changes) if changes else "ℹ️ Aucune modification.", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ IDs doivent être des nombres.", ephemeral=True)
+
+class ListenerConfigModal(Modal, title="Config Listener Bots"):
+    mod_chan_input = TextInput(label="ID Salon Mod (Logs)", required=False)
+    event_chan_input = TextInput(label="ID Salon Event", required=False)
+    active_input = TextInput(label="Activer ? (oui/non)", placeholder="oui", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        settings = db.setdefault("settings", {}).setdefault("mod_listener_settings", {})
+        try:
+            if self.mod_chan_input.value: settings["mod_bot_channel_id"] = int(self.mod_chan_input.value)
+            if self.event_chan_input.value: settings["event_bot_channel_id"] = int(self.event_chan_input.value)
+            if self.active_input.value: settings["enabled"] = (self.active_input.value.lower() == "oui")
+            save_data(db)
+            await interaction.response.send_message("✅ Config Listener mise à jour.", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ IDs invalides.", ephemeral=True)
+
+class TopWeekConfigModal(Modal, title="Config TopWeek"):
+    day_input = TextInput(label="Jour (0=Lundi, 6=Dimanche)", placeholder="6", required=True)
+    time_input = TextInput(label="Heure UTC (HH:MM)", placeholder="19:00", required=True)
+    channel_id_input = TextInput(label="ID Salon Annonce", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            day = int(self.day_input.value)
+            if not (0 <= day <= 6): raise ValueError
+            time_obj = datetime.datetime.strptime(self.time_input.value, "%H:%M")
+            chan_id = int(self.channel_id_input.value)
+            
+            s = db.setdefault("settings", {}).setdefault("topweek_settings", {})
+            s["channel_id"] = chan_id
+            s["announcement_day"] = day
+            s["announcement_time"] = self.time_input.value
+            save_data(db)
+            await interaction.response.send_message("✅ TopWeek configuré.", ephemeral=True)
+        except ValueError:
+             await interaction.response.send_message("❌ Format invalide.", ephemeral=True)
+
+class BirthdayAdminConfigModal(Modal, title="Config Anniversaires"):
+    channel_id_input = TextInput(label="ID Salon Annonce", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            chan_id = int(self.channel_id_input.value)
+            db.setdefault("settings", {}).setdefault("birthday_settings", {})["channel_id"] = chan_id
+            save_data(db)
+            await interaction.response.send_message("✅ Salon Anniversaires configuré.", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ ID invalide.", ephemeral=True)
+
+class PanelCustomModal(Modal, title="Personnaliser Panels"):
+    json_input = TextInput(label="JSON Config", style=discord.TextStyle.paragraph, placeholder='{"admin": {"title": "Mon Titre"}}', required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            config = json.loads(self.json_input.value)
+            db.setdefault("settings", {})["panel_config"] = config
+            save_data(db)
+            await interaction.response.send_message("✅ Config Panels mise à jour.", ephemeral=True)
+        except json.JSONDecodeError:
+            await interaction.response.send_message("❌ JSON invalide.", ephemeral=True)
+
+class TeamCreateModal(Modal, title="Créer une Équipe"):
+    name_input = TextInput(label="Nom de l'équipe", placeholder="Ex: Les Dragons", required=True, max_length=50)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_data = get_user_xp_data(interaction.user.id)
+        if user_data.get("team_name"):
+            await interaction.response.send_message("❌ Tu fais déjà partie d'une équipe !", ephemeral=True)
+            return
+
+        team_name = self.name_input.value.strip()
+        if team_name in db.get("teams", {}):
+            await interaction.response.send_message("❌ Une équipe avec ce nom existe déjà.", ephemeral=True)
+            return
+
+        db.setdefault("teams", {})[team_name] = {
+            "name": team_name,
+            "creator_id": interaction.user.id,
+            "members": [interaction.user.id],
+            "logo_url": None,
+            "role_id": None,
+            "color_hex": f"#{TEAM_COLOR:06x}" 
+        }
+        user_data["team_name"] = team_name
+        save_data(db)
+
+        embed = discord.Embed(title=f"🎉 Équipe Créée : {team_name}", description=f"Félicitations {interaction.user.mention} !", color=TEAM_COLOR)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# NOUVEAUX MODALS TEAM
+class TeamAddModal(Modal, title="Ajouter un Membre"):
+    member_id_input = TextInput(label="ID du Membre", placeholder="123456...", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.member_id_input.value)
+            target_member = interaction.guild.get_member(target_id)
+            if not target_member:
+                await interaction.response.send_message("❌ Membre introuvable.", ephemeral=True)
+                return
+            # Logique add... (simplifiée ici, appel à team_add possible mais complexe via modal direct, on refait la logique)
+            user_data = get_user_xp_data(interaction.user.id)
+            team_name = user_data.get("team_name")
+            if not team_name: return await interaction.response.send_message("❌ Pas de team.", ephemeral=True)
+            team_data = db.get("teams", {}).get(team_name)
+            if team_data.get("creator_id") != interaction.user.id: return await interaction.response.send_message("❌ Pas créateur.", ephemeral=True)
+            
+            target_data = get_user_xp_data(target_id)
+            if target_data.get("team_name"): return await interaction.response.send_message("❌ Déjà en team.", ephemeral=True)
+            
+            team_data["members"].append(target_id)
+            target_data["team_name"] = team_name
+            save_data(db)
+            await interaction.response.send_message(f"✅ {target_member.display_name} ajouté !", ephemeral=True)
+        except ValueError: await interaction.response.send_message("❌ ID invalide.", ephemeral=True)
+
+class TeamSetLogoModal(Modal, title="Changer Logo Team"):
+    url_input = TextInput(label="URL Logo", placeholder="https://...", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        # Logique set_logo
+        user_data = get_user_xp_data(interaction.user.id)
+        team_name = user_data.get("team_name")
+        if not team_name: return await interaction.response.send_message("❌ Pas de team.", ephemeral=True)
+        team_data = db.get("teams", {}).get(team_name)
+        if team_data.get("creator_id") != interaction.user.id: return await interaction.response.send_message("❌ Pas créateur.", ephemeral=True)
+        
+        team_data["logo_url"] = self.url_input.value
+        save_data(db)
+        await interaction.response.send_message("✅ Logo mis à jour.", ephemeral=True)
+
+class TeamSetColorModal(Modal, title="Changer Couleur Team"):
+    hex_input = TextInput(label="Code Hex", placeholder="#FF0000", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        # Logique set_color
+        user_data = get_user_xp_data(interaction.user.id)
+        team_name = user_data.get("team_name")
+        if not team_name: return await interaction.response.send_message("❌ Pas de team.", ephemeral=True)
+        team_data = db.get("teams", {}).get(team_name)
+        if team_data.get("creator_id") != interaction.user.id: return await interaction.response.send_message("❌ Pas créateur.", ephemeral=True)
+        
+        team_data["color_hex"] = self.hex_input.value
+        save_data(db)
+        await interaction.response.send_message("✅ Couleur mise à jour.", ephemeral=True)
+
+class TeamSetRoleModal(Modal, title="Lier Rôle Team"):
+    role_id_input = TextInput(label="ID Rôle", placeholder="123456...", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            role_id = int(self.role_id_input.value)
+            user_data = get_user_xp_data(interaction.user.id)
+            team_name = user_data.get("team_name")
+            if not team_name: return await interaction.response.send_message("❌ Pas de team.", ephemeral=True)
+            team_data = db.get("teams", {}).get(team_name)
+            if team_data.get("creator_id") != interaction.user.id: return await interaction.response.send_message("❌ Pas créateur.", ephemeral=True)
+            
+            team_data["role_id"] = role_id
+            save_data(db)
+            await interaction.response.send_message("✅ Rôle lié.", ephemeral=True)
+        except ValueError: await interaction.response.send_message("❌ ID invalide.", ephemeral=True)
+
+
+class NotifAddModal(Modal, title="Ajouter Notification Rapide"):
+    name_input = TextInput(label="Nom (pour repérer)", placeholder="Ex: Squeezie YT", required=True)
+    platform_input = TextInput(label="Plateforme", placeholder="YouTube, Twitch, Kick...", required=True)
+    id_input = TextInput(label="Identifiant (Pseudo/ID)", placeholder="Ex: Squeezie", required=True)
+    category_input = TextInput(label="Catégorie (Live/Vidéo)", placeholder="Live", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        platform_lower = self.platform_input.value.lower()
+        if platform_lower not in PLATFORM_CHECKERS:
+            await interaction.response.send_message(f"❌ Plateforme invalide.", ephemeral=True)
+            return
+            
+        guild_id_str = str(interaction.guild_id)
+        g_sources = notif_db.setdefault("servers", {}).setdefault(guild_id_str, {}).setdefault("sources", [])
+        
+        default_msg = "@everyone {creator} est en ligne !"
+        
+        g_sources.append({
+            "name": self.name_input.value,
+            "platform": platform_lower,
+            "id": self.id_input.value,
+            "category": self.category_input.value.lower(),
+            "channel_id": interaction.channel_id,
+            "config": {"message_ping": default_msg, "embed_json": None}
+        })
+        save_notif_data(notif_db)
+        await interaction.response.send_message(f"✅ Notification ajoutée pour ce salon !", ephemeral=True)
+
+class ConfigChannelModal(Modal, title="Configurer un Salon"):
+    def __init__(self, key: str, nice_name: str):
+        super().__init__(title=f"Config: {nice_name}")
+        self.key = key
+        self.channel_id_input = TextInput(label="ID du Salon (Clic droit -> Copier ID)", placeholder="Ex: 123456789...", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            chan_id = int(self.channel_id_input.value)
+            channel = interaction.guild.get_channel(chan_id)
+            if not channel:
+                await interaction.response.send_message("❌ Salon introuvable (Vérifiez l'ID).", ephemeral=True)
+                return
+            
+            # Application de la config selon la clé
+            if self.key.startswith("news_") or self.key.startswith("episodes_"): # Ciné Pixel
+                 db.setdefault("settings", {}).setdefault("cine_pixel_channels", {})[self.key] = chan_id
+                 msg = f"✅ Catégorie Ciné Pixel configurée sur {channel.mention}."
+            elif self.key == "free_games":
+                 db.setdefault("settings", {}).setdefault("free_games_settings", {})["channel_id"] = chan_id
+                 msg = f"✅ Jeux Gratuits configurés sur {channel.mention}."
+            
+            save_data(db)
+            await interaction.response.send_message(msg, ephemeral=True)
+
+        except ValueError:
+             await interaction.response.send_message("❌ ID invalide (doit être un nombre).", ephemeral=True)
+
+class NotifEditModal(Modal, title="Éditer une Notification"):
+    def __init__(self, notif_name: str):
+        super().__init__(title=f"Éditer: {notif_name}")
+        self.notif_name = notif_name
+        self.message_input = TextInput(label="Nouveau Message", required=False)
+        self.id_input = TextInput(label="Nouveau Pseudo/ID", required=False)
+        # Note: Impossible d'éditer le salon facilement par modal sans demander l'ID, on se concentre sur l'essentiel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id_str = str(interaction.guild_id)
+        g_sources = notif_db.get("servers", {}).get(guild_id_str, {}).get("sources", [])
+        
+        target = next((s for s in g_sources if s["name"] == self.notif_name), None)
+        if not target:
+            await interaction.response.send_message("❌ Notification introuvable.", ephemeral=True)
+            return
+            
+        changes = []
+        if self.message_input.value:
+            target.setdefault("config", {})["message_ping"] = self.message_input.value
+            changes.append("Message mis à jour")
+        if self.id_input.value:
+            target["id"] = self.id_input.value
+            changes.append("ID mis à jour")
+            
+        if changes:
+            save_notif_data(notif_db)
+            await interaction.response.send_message(f"✅ {', '.join(changes)}.", ephemeral=True)
+        else:
+            await interaction.response.send_message("ℹ️ Aucune modification.", ephemeral=True)
+
+# --- PANEL ADMIN (VUES & MENUS) ---
+
+class AdminXPView(View):
+    """Sous-menu XP"""
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="Give XP", style=discord.ButtonStyle.secondary, emoji="➕")
+    async def give_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(GiveXPModal())
+    
+    @discord.ui.button(label="Set Level", style=discord.ButtonStyle.secondary, emoji="🆙")
+    async def set_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(SetLevelModal())
+
+    @discord.ui.button(label="Reset Weekly", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def reset_btn(self, interaction: discord.Interaction, button: Button):
+        await adminxp_resetweekly(interaction)
+
+class AdminSystemView(View):
+    """Sous-menu Système"""
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="Sync", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def sync_btn(self, interaction: discord.Interaction, button: Button):
+        await admin_sync(interaction)
+    
+    @discord.ui.button(label="Config Listener", style=discord.ButtonStyle.secondary, emoji="👂")
+    async def conf_list_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(ListenerConfigModal())
+    
+    @discord.ui.button(label="Reset Listener", style=discord.ButtonStyle.secondary, emoji="🔇")
+    async def reset_list_btn(self, interaction: discord.Interaction, button: Button):
+        await reset_listener(interaction)
+
+    @discord.ui.button(label="Panel Custom (JSON)", style=discord.ButtonStyle.secondary, emoji="🎨")
+    async def custom_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(PanelCustomModal())
+
+class AdminEventsView(View):
+    """Sous-menu Events"""
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="Config Anniv", style=discord.ButtonStyle.secondary, emoji="🎂")
+    async def bday_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(BirthdayAdminConfigModal())
+
+    @discord.ui.button(label="Config TopWeek", style=discord.ButtonStyle.secondary, emoji="🏆")
+    async def top_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(TopWeekConfigModal())
+
+    @discord.ui.button(label="Rewards (Lvl)", style=discord.ButtonStyle.secondary, emoji="🎁")
+    async def rew_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(RewardsConfigModal())
 
 class AdminChannelConfigView(View):
-    """Sous-menu pour la config des salons."""
+    """Sous-menu pour la config des salons (100% Interactif)."""
     def __init__(self):
         super().__init__(timeout=60)
     
     @discord.ui.select(
         placeholder="Choisir une action de configuration...",
         options=[
-            discord.SelectOption(label="Set Séries Channel", value="cine_series", emoji="📺"),
-            discord.SelectOption(label="Remove Séries Channel", value="rm_cine_series", emoji="🗑️"),
-            discord.SelectOption(label="Set Anime Channel", value="cine_anime", emoji="👺"),
-            discord.SelectOption(label="Remove Anime Channel", value="rm_cine_anime", emoji="🗑️"),
-            discord.SelectOption(label="Config FreeGames", value="free_conf", emoji="🎁"),
-            discord.SelectOption(label="Remove FreeGames", value="free_rm", emoji="🚫"),
+            discord.SelectOption(label="Set Séries Channel", value="news_series", emoji="📺"),
+            discord.SelectOption(label="Remove Séries Channel", value="rm_news_series", emoji="🗑️"),
+            discord.SelectOption(label="Set Anime Channel", value="news_anime", emoji="👺"),
+            discord.SelectOption(label="Remove Anime Channel", value="rm_news_anime", emoji="🗑️"),
+            discord.SelectOption(label="Set Films Channel", value="news_movies", emoji="🎬"),
+            discord.SelectOption(label="Remove Films Channel", value="rm_news_movies", emoji="🗑️"),
+            discord.SelectOption(label="Set Cartoons Channel", value="news_cartoons", emoji="🐭"),
+            discord.SelectOption(label="Remove Cartoons Channel", value="rm_news_cartoons", emoji="🗑️"),
+            discord.SelectOption(label="Set Episodes Channel (Séries)", value="episodes_series", emoji="📅"),
+            discord.SelectOption(label="Set Episodes Channel (Anime)", value="episodes_anime", emoji="📅"),
+            discord.SelectOption(label="Config FreeGames", value="free_games", emoji="🎁"),
+            discord.SelectOption(label="Remove FreeGames", value="rm_free_games", emoji="🚫"),
             discord.SelectOption(label="Test News (Force)", value="test_news", emoji="🧪"),
         ]
     )
     async def select_callback(self, interaction: discord.Interaction, select: Select):
         val = select.values[0]
-        if val == "cine_series":
-            await interaction.response.send_message("Utilisez `/cineconfig set_channel news_series #salon`", ephemeral=True)
-        elif val == "rm_cine_series":
-            await interaction.response.send_message("Utilisez `/cineconfig remove_channel news_series`", ephemeral=True)
-        elif val == "free_conf":
-            await interaction.response.send_message("Utilisez `/freegames config #salon`", ephemeral=True)
-        elif val == "test_news":
-            await interaction.response.send_message("Utilisez `/admin_test_news`", ephemeral=True)
+        
+        if val == "test_news":
+            await admin_test_news(interaction, "CinéPixel") 
+        elif val.startswith("rm_"):
+            # Suppression directe
+            cat = val.replace("rm_", "")
+            if cat == "free_games":
+                await freegames_remove(interaction)
+            else:
+                await cineconfig_remove(interaction, cat)
         else:
-            await interaction.response.send_message(f"Action sélectionnée : {val} (Utilisez la commande correspondante)", ephemeral=True)
+            # Ajout via Modal
+            nice_names = {"news_series": "Séries", "news_anime": "Anime", "news_movies": "Films", "news_cartoons": "Cartoons", "episodes_series": "Épisodes Séries", "episodes_anime": "Épisodes Anime", "free_games": "Jeux Gratuits"}
+            await interaction.response.send_modal(ConfigChannelModal(val, nice_names.get(val, "Inconnu")))
 
 class AdminPanelView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Sync Commandes", style=discord.ButtonStyle.secondary, emoji="🔄")
-    async def sync_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer(ephemeral=True)
-        await client.tree.sync()
-        await interaction.followup.send("✅ Commandes synchronisées.", ephemeral=True)
+    @discord.ui.button(label="Gestion XP", style=discord.ButtonStyle.secondary, emoji="✨")
+    async def xp_menu_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("🔹 **Menu Gestion XP**", view=AdminXPView(), ephemeral=True)
 
-    @discord.ui.button(label="Donner XP", style=discord.ButtonStyle.secondary, emoji="✨")
-    async def give_xp_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Utilisez `/adminxp give`", ephemeral=True)
+    @discord.ui.button(label="Système", style=discord.ButtonStyle.secondary, emoji="⚙️")
+    async def sys_menu_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("🔹 **Menu Système**", view=AdminSystemView(), ephemeral=True)
+
+    @discord.ui.button(label="Events Config", style=discord.ButtonStyle.secondary, emoji="🎉")
+    async def evt_menu_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("🔹 **Menu Events**", view=AdminEventsView(), ephemeral=True)
 
     @discord.ui.button(label="Config Salons", style=discord.ButtonStyle.secondary, emoji="📢")
     async def config_chan_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("🛠️ **Configuration des Salons**", view=AdminChannelConfigView(), ephemeral=True)
+        await interaction.response.send_message("🛠️ **Configuration des Salons**\nSélectionnez une catégorie.", view=AdminChannelConfigView(), ephemeral=True)
 
     @discord.ui.button(label="Rank BG", style=discord.ButtonStyle.secondary, emoji="🖼️")
     async def rank_bg_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Utilisez `/rank_background` pour changer l'image.", ephemeral=True)
+        await interaction.response.send_modal(RankBackgroundModal())
 
 # --- PANEL JOUEUR ---
 
 class PlayerNewsView(View):
-    """Sous-menu pour les news."""
+    """Sous-menu pour les news (Action directe)."""
     @discord.ui.select(
         placeholder="Quelles news voir ?",
         options=[
@@ -2325,6 +2730,8 @@ class PlayerNewsView(View):
             discord.SelectOption(label="Films", value="news_movies", emoji="🎬"),
             discord.SelectOption(label="Animés", value="news_anime", emoji="👺"),
             discord.SelectOption(label="Cartoons", value="news_cartoons", emoji="🐭"),
+            discord.SelectOption(label="Épisodes Séries (Auj.)", value="episodes_series", emoji="📅"),
+            discord.SelectOption(label="Épisodes Anime (Auj.)", value="episodes_anime", emoji="📅"),
         ]
     )
     async def callback(self, interaction: discord.Interaction, select: Select):
@@ -2334,21 +2741,22 @@ class PlayerNewsView(View):
         elif val == "news_movies": await handle_manual_cine_check(interaction, 'news_movies', 'movie')
         elif val == "news_anime": await handle_manual_cine_check(interaction, 'news_anime', 'tv', is_anime=True)
         elif val == "news_cartoons": await handle_manual_cine_check(interaction, 'news_cartoons', 'tv', is_cartoon=True)
+        elif val == "episodes_series": await handle_manual_cine_check(interaction, 'episodes_series', 'tv')
+        elif val == "episodes_anime": await handle_manual_cine_check(interaction, 'episodes_anime', 'tv', is_anime=True)
 
 class PlayerBirthdayView(View):
-    """Sous-menu Anniversaire."""
+    """Sous-menu Anniversaire (Action directe)."""
     @discord.ui.select(
         placeholder="Gérer mon anniversaire...",
         options=[
-            discord.SelectOption(label="Liste", value="list", emoji="📅"),
-            discord.SelectOption(label="Prochain", value="next", emoji="🎂"),
+            discord.SelectOption(label="Voir la Liste", value="list", emoji="📅"),
+            discord.SelectOption(label="Voir le Prochain", value="next", emoji="🎂"),
             discord.SelectOption(label="Supprimer le mien", value="remove", emoji="❌"),
         ]
     )
     async def callback(self, interaction: discord.Interaction, select: Select):
         val = select.values[0]
         if val == "remove":
-            # Logique remove simplifiée
             user_id = str(interaction.user.id)
             if user_id in db.get("birthdays", {}):
                 del db["birthdays"][user_id]
@@ -2357,10 +2765,9 @@ class PlayerBirthdayView(View):
             else:
                 await interaction.response.send_message("❌ Pas d'anniversaire enregistré.", ephemeral=True)
         elif val == "list":
-            # On appelle la commande existante (via un message simple ici pour l'exemple, ou refacto)
-            await interaction.response.send_message("Utilisez `/birthdaylist` pour voir la liste complète.", ephemeral=True)
+            await birthdaylist(interaction)
         elif val == "next":
-            await interaction.response.send_message("Utilisez `/nextbirthday`.", ephemeral=True)
+            await nextbirthday(interaction)
 
 class PlayerPanelView(View):
     def __init__(self):
@@ -2368,12 +2775,11 @@ class PlayerPanelView(View):
 
     @discord.ui.button(label="Mon Rank", style=discord.ButtonStyle.secondary, emoji="📊")
     async def rank_btn(self, interaction: discord.Interaction, button: Button):
-        # Appelle la logique de rank
-        await rank(interaction) # Appel direct à la fonction de commande
+        await rank(interaction) 
 
     @discord.ui.button(label="Jeux Gratuits", style=discord.ButtonStyle.secondary, emoji="🎁")
     async def free_btn(self, interaction: discord.Interaction, button: Button):
-        await free(interaction) # Appel direct
+        await free(interaction) 
 
     @discord.ui.button(label="News Ciné/Séries", style=discord.ButtonStyle.secondary, emoji="📰")
     async def news_btn(self, interaction: discord.Interaction, button: Button):
@@ -2383,16 +2789,71 @@ class PlayerPanelView(View):
     async def bday_btn(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("Menu Anniversaire :", view=PlayerBirthdayView(), ephemeral=True)
 
-# --- PANEL NOTIF ---
+# --- PANEL NOTIF (Action via Menu Déroulant) ---
+
+class NotifManageView(View):
+    """Sous-menu pour Gérer les Notifs (Action directe)."""
+    def __init__(self, guild_id: str):
+        super().__init__(timeout=60)
+        
+        # Récupérer la liste des notifs pour créer le select menu
+        sources = notif_db.get("servers", {}).get(guild_id, {}).get("sources", [])
+        
+        options = []
+        if not sources:
+             options.append(discord.SelectOption(label="Aucune notification", value="none"))
+        else:
+            for s in sources[:25]: # Limite Discord 25 options
+                options.append(discord.SelectOption(label=s["name"], value=s["name"]))
+
+        # Select pour CHOISIR la notif
+        self.notif_select = Select(placeholder="Choisir une notification à gérer...", options=options)
+        self.notif_select.callback = self.select_notif_callback
+        self.add_item(self.notif_select)
+
+    async def select_notif_callback(self, interaction: discord.Interaction):
+        notif_name = self.notif_select.values[0]
+        if notif_name == "none": return
+        
+        # Une fois la notif choisie, on propose les actions
+        await interaction.response.send_message(f"Action sur **{notif_name}** :", view=NotifActionView(notif_name), ephemeral=True)
+
+class NotifActionView(View):
+    """Actions spécifiques sur une notif choisie."""
+    def __init__(self, notif_name: str):
+        super().__init__(timeout=60)
+        self.notif_name = notif_name
+    
+    @discord.ui.button(label="Tester", style=discord.ButtonStyle.success, emoji="🧪")
+    async def test_btn(self, interaction: discord.Interaction, button: Button):
+        await notif_test(interaction, self.notif_name)
+
+    @discord.ui.button(label="Éditer", style=discord.ButtonStyle.primary, emoji="✏️")
+    async def edit_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(NotifEditModal(self.notif_name))
+
+    @discord.ui.button(label="Supprimer", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def remove_btn(self, interaction: discord.Interaction, button: Button):
+        await notif_remove(interaction, self.notif_name)
+
+    @discord.ui.button(label="Config (Avancé)", style=discord.ButtonStyle.secondary, emoji="⚙️")
+    async def config_btn(self, interaction: discord.Interaction, button: Button):
+        await notif_config(interaction, self.notif_name)
+
 class NotifPanelView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
     @discord.ui.button(label="Ajouter Notif", style=discord.ButtonStyle.secondary, emoji="➕")
     async def add_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Utilisez `/notif add`", ephemeral=True)
+        await interaction.response.send_modal(NotifAddModal())
 
-    @discord.ui.button(label="Lister", style=discord.ButtonStyle.secondary, emoji="📜")
+    @discord.ui.button(label="Gérer Notifs", style=discord.ButtonStyle.secondary, emoji="🔧")
+    async def manage_btn(self, interaction: discord.Interaction, button: Button):
+        # Ouvre le menu déroulant de choix
+        await interaction.response.send_message("Sélectionnez une notification :", view=NotifManageView(str(interaction.guild_id)), ephemeral=True)
+
+    @discord.ui.button(label="Lister Tout", style=discord.ButtonStyle.secondary, emoji="📜")
     async def list_btn(self, interaction: discord.Interaction, button: Button):
         await notif_list(interaction)
 
@@ -2407,11 +2868,36 @@ class TeamPanelView(View):
     
     @discord.ui.button(label="Créer Team", style=discord.ButtonStyle.secondary, emoji="⚔️")
     async def create_btn(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Utilisez `/team create [nom]`", ephemeral=True)
+        await interaction.response.send_modal(TeamCreateModal())
+    
+    @discord.ui.button(label="Rejoindre (Add)", style=discord.ButtonStyle.secondary, emoji="➕")
+    async def add_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(TeamAddModal())
+
+    @discord.ui.button(label="Quitter (Remove)", style=discord.ButtonStyle.secondary, emoji="➖")
+    async def remove_btn(self, interaction: discord.Interaction, button: Button):
+        await team_remove(interaction)
+
+    @discord.ui.button(label="Set Logo", style=discord.ButtonStyle.secondary, emoji="🖼️")
+    async def logo_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(TeamSetLogoModal())
+
+    @discord.ui.button(label="Set Couleur", style=discord.ButtonStyle.secondary, emoji="🎨")
+    async def color_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(TeamSetColorModal())
+
+    @discord.ui.button(label="Set Role", style=discord.ButtonStyle.secondary, emoji="🏷️")
+    async def role_btn(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(TeamSetRoleModal())
 
     @discord.ui.button(label="Liste Teams", style=discord.ButtonStyle.secondary, emoji="📋")
     async def list_btn(self, interaction: discord.Interaction, button: Button):
         await teamlist(interaction)
+    
+    @discord.ui.button(label="Info Team", style=discord.ButtonStyle.secondary, emoji="ℹ️")
+    async def info_btn(self, interaction: discord.Interaction, button: Button):
+        # Affiche l'info de sa propre team
+        await team_info(interaction)
 
 # --- COMMANDE PRINCIPALE PANEL ---
 @client.tree.command(name="panel", description="Affiche un panel de contrôle.")
